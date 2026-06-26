@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const AdmZip = require('adm-zip');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
@@ -30,23 +31,26 @@ function saveDB(db) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 }
 
-// Multer 설정
+// Multer 설정 - zip과 html 모두 허용
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, REPORTS_DIR),
   filename: (req, file, cb) => {
     const id = uuidv4();
-    cb(null, `${id}.html`);
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `${id}${ext}`);
   }
 });
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
-    if (path.extname(file.originalname).toLowerCase() === '.html') {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (['.html', '.zip'].includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('HTML 파일만 업로드 가능합니다.'));
+      cb(new Error('HTML 또는 ZIP 파일만 업로드 가능합니다.'));
     }
-  }
+  },
+  limits: { fileSize: 200 * 1024 * 1024 } // 200MB
 });
 
 // 정적 파일
@@ -54,12 +58,57 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(REPORTS_DIR));
 app.use(express.json());
 
+// ──────────── 헬퍼 ────────────
+
+// zip 파일 압축 해제 → 폴더로 저장, index.html 경로 반환
+function extractZip(zipPath) {
+  const id = path.basename(zipPath, '.zip');
+  const extractDir = path.join(REPORTS_DIR, id);
+  fs.mkdirSync(extractDir, { recursive: true });
+
+  const zip = new AdmZip(zipPath);
+  zip.extractAllTo(extractDir, true);
+
+  // zip 원본 삭제
+  fs.unlinkSync(zipPath);
+
+  // index.html 찾기 (최상위 또는 한 단계 안)
+  const indexPath = findIndexHtml(extractDir);
+  return { extractDir: id, indexPath };
+}
+
+function findIndexHtml(dir, depth = 0) {
+  if (depth > 2) return null;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+  // 현재 디렉토리에서 index.html 찾기
+  const htmlFile = entries.find(e => e.isFile() && e.name.toLowerCase() === 'index.html');
+  if (htmlFile) {
+    return path.relative(path.join(__dirname, 'uploads'), path.join(dir, htmlFile.name));
+  }
+
+  // 서브 디렉토리 탐색
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      const found = findIndexHtml(path.join(dir, entry.name), depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// 디렉토리 재귀 삭제
+function rmDir(dirPath) {
+  if (fs.existsSync(dirPath)) {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  }
+}
+
 // ──────────── API ────────────
 
 // 프로젝트 목록
 app.get('/api/projects', (req, res) => {
   const db = loadDB();
-  // 각 프로젝트에 리포트 수, 최근 날짜 등 부가 정보 첨부
   const projects = db.projects.map(p => {
     const reports = db.reports.filter(r => r.projectId === p.id);
     const dates = [...new Set(reports.map(r => r.date))].sort().reverse();
@@ -95,11 +144,10 @@ app.delete('/api/projects/:id', (req, res) => {
   const project = db.projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
 
-  // 관련 리포트 파일 삭제
+  // 관련 리포트 파일/폴더 삭제
   const reports = db.reports.filter(r => r.projectId === req.params.id);
   for (const r of reports) {
-    const filePath = path.join(REPORTS_DIR, r.fileName);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    deleteReportFiles(r);
   }
 
   db.projects = db.projects.filter(p => p.id !== req.params.id);
@@ -107,6 +155,16 @@ app.delete('/api/projects/:id', (req, res) => {
   saveDB(db);
   res.json({ success: true });
 });
+
+// 리포트 파일/폴더 삭제 헬퍼
+function deleteReportFiles(report) {
+  if (report.type === 'folder') {
+    rmDir(path.join(REPORTS_DIR, report.folderId));
+  } else {
+    const filePath = path.join(REPORTS_DIR, report.fileName);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  }
+}
 
 // 특정 프로젝트의 리포트 목록 (날짜별 그룹)
 app.get('/api/projects/:id/reports', (req, res) => {
@@ -125,7 +183,7 @@ app.get('/api/projects/:id/reports', (req, res) => {
   res.json(grouped);
 });
 
-// 리포트 업로드
+// 리포트 업로드 (HTML 단일 파일 또는 ZIP)
 app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
   const db = loadDB();
   const project = db.projects.find(p => p.id === req.params.id);
@@ -136,18 +194,45 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
   const newReports = [];
 
   for (const file of req.files) {
-    const report = {
-      id: uuidv4(),
-      projectId: req.params.id,
-      originalName: Buffer.from(file.originalname, 'latin1').toString('utf8'),
-      fileName: file.filename,
-      date,
-      uploadedBy,
-      uploadedAt: new Date().toISOString(),
-      memo: ''
-    };
-    db.reports.push(report);
-    newReports.push(report);
+    const ext = path.extname(file.originalname).toLowerCase();
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+
+    if (ext === '.zip') {
+      // ZIP → 폴더로 압축 해제
+      const filePath = path.join(REPORTS_DIR, file.filename);
+      const { extractDir, indexPath } = extractZip(filePath);
+
+      const report = {
+        id: uuidv4(),
+        projectId: req.params.id,
+        originalName: originalName.replace('.zip', ''),
+        type: 'folder',
+        folderId: extractDir,
+        indexPath: indexPath || `${extractDir}/index.html`,
+        date,
+        uploadedBy,
+        uploadedAt: new Date().toISOString(),
+        memo: ''
+      };
+      db.reports.push(report);
+      newReports.push(report);
+    } else {
+      // 단일 HTML
+      const report = {
+        id: uuidv4(),
+        projectId: req.params.id,
+        originalName,
+        type: 'single',
+        fileName: file.filename,
+        indexPath: file.filename,
+        date,
+        uploadedBy,
+        uploadedAt: new Date().toISOString(),
+        memo: ''
+      };
+      db.reports.push(report);
+      newReports.push(report);
+    }
   }
 
   saveDB(db);
@@ -160,9 +245,7 @@ app.delete('/api/reports/:id', (req, res) => {
   const report = db.reports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
 
-  const filePath = path.join(REPORTS_DIR, report.fileName);
-  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
+  deleteReportFiles(report);
   db.reports = db.reports.filter(r => r.id !== req.params.id);
   saveDB(db);
   res.json({ success: true });

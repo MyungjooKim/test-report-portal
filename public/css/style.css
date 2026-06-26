@@ -523,3 +523,17 @@ body {
 .empty-state .empty-icon { font-size: 48px; margin-bottom: 16px; }
 .empty-state h3 { font-size: 16px; margin-bottom: 8px; color: var(--text); }
 .empty-state p { font-size: 14px; margin-bottom: 20px; }
+
+
+/* ===== Type Badge ===== */
+.type-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-weight: 600;
+  margin-left: 6px;
+  vertical-align: middle;
+}

@@ -120,19 +120,22 @@ function renderDateGroups(grouped) {
           <span style="margin-left:auto; font-size:12px; color:var(--text-secondary)">${reports.length}건</span>
         </div>
         <div class="report-items">
-          ${reports.map(r => `
-            <div class="report-item" onclick="viewReport('${r.id}', '${r.fileName}', '${escapeAttr(r.originalName)}')">
-              <span class="ri-icon">📄</span>
+          ${reports.map(r => {
+            const typeIcon = r.type === 'folder' ? '📂' : '📄';
+            const typeBadge = r.type === 'folder' ? '<span class="type-badge">ZIP</span>' : '';
+            return `
+            <div class="report-item" onclick="viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')">
+              <span class="ri-icon">${typeIcon}</span>
               <div class="ri-info">
-                <div class="ri-name">${escapeHtml(r.originalName)}</div>
+                <div class="ri-name">${escapeHtml(r.originalName)} ${typeBadge}</div>
                 <div class="ri-meta">${r.uploadedBy} · ${formatTime(r.uploadedAt)}</div>
               </div>
               <div class="ri-actions">
-                <button class="btn-icon-sm" onclick="event.stopPropagation(); openReportDirect('${r.fileName}')" title="새 탭에서 열기">↗</button>
+                <button class="btn-icon-sm" onclick="event.stopPropagation(); openReportDirect('${escapeAttr(r.indexPath)}')" title="새 탭에서 열기">↗</button>
                 <button class="btn-icon-sm danger" onclick="event.stopPropagation(); deleteReport('${r.id}')" title="삭제">🗑</button>
               </div>
             </div>
-          `).join('')}
+          `}).join('')}
         </div>
       </div>
     `;
@@ -140,8 +143,8 @@ function renderDateGroups(grouped) {
 }
 
 // ===== Viewer =====
-function viewReport(id, fileName, originalName) {
-  currentReportUrl = `/uploads/${fileName}`;
+function viewReport(id, indexPath, originalName) {
+  currentReportUrl = `/uploads/${indexPath}`;
   document.getElementById('viewerTitle').textContent = originalName;
   document.getElementById('viewerFrame').src = currentReportUrl;
   showView('reportViewer');
@@ -160,8 +163,8 @@ function openReportNewTab() {
   if (currentReportUrl) window.open(currentReportUrl, '_blank');
 }
 
-function openReportDirect(fileName) {
-  window.open(`/uploads/${fileName}`, '_blank');
+function openReportDirect(indexPath) {
+  window.open(`/uploads/${indexPath}`, '_blank');
 }
 
 // ===== Upload =====
@@ -183,7 +186,9 @@ function setupUploadZone() {
   zone.addEventListener('drop', (e) => {
     e.preventDefault();
     zone.classList.remove('dragover');
-    const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.html'));
+    const files = Array.from(e.dataTransfer.files).filter(f => 
+      f.name.endsWith('.html') || f.name.endsWith('.zip')
+    );
     addFiles(files);
   });
 
