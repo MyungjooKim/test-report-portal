@@ -703,3 +703,15 @@ body {
   display: flex;
   align-items: center;
 }
+
+
+/* ===== Sidebar Footer ===== */
+.sidebar-footer {
+  padding: 12px 20px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+.version-label {
+  font-size: 11px;
+  color: #6b7280;
+}
