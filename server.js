@@ -3,6 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const AdmZip = require('adm-zip');
+const { marked } = require('marked');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
@@ -44,10 +45,10 @@ const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (['.html', '.zip'].includes(ext)) {
+    if (['.html', '.zip', '.md'].includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('HTML 또는 ZIP 파일만 업로드 가능합니다.'));
+      cb(new Error('HTML, ZIP, 또는 MD 파일만 업로드 가능합니다.'));
     }
   },
   limits: { fileSize: 200 * 1024 * 1024 }
@@ -149,7 +150,6 @@ function buildProjectTree(db, parentId = null) {
         : p.createdAt;
 
       const childNodes = buildProjectTree(db, p.id);
-      // 하위 프로젝트의 리포트 수도 합산
       const childReportCount = childNodes.reduce((sum, c) => sum + c.totalReportCount, 0);
 
       return {
@@ -163,8 +163,12 @@ function buildProjectTree(db, parentId = null) {
       };
     });
 
-  // 최신 활동 기준 내림차순
-  children.sort((a, b) => new Date(b.latestUpload) - new Date(a.latestUpload));
+  // order 필드 기준 정렬 (없으면 생성일 순)
+  children.sort((a, b) => {
+    const orderA = a.order !== undefined ? a.order : 0;
+    const orderB = b.order !== undefined ? b.order : 0;
+    return orderA - orderB;
+  });
   return children;
 }
 
@@ -214,6 +218,24 @@ app.patch('/api/projects/:id', (req, res) => {
   project.name = name.trim();
   saveDB(db);
   res.json({ success: true, project });
+});
+
+// 프로젝트 순서 변경
+app.put('/api/projects/reorder', (req, res) => {
+  const db = loadDB();
+  const { orders } = req.body; // [{ id, order }]
+
+  if (!Array.isArray(orders)) return res.status(400).json({ error: 'orders 배열이 필요합니다.' });
+
+  for (const item of orders) {
+    const project = db.projects.find(p => p.id === item.id);
+    if (project) {
+      project.order = item.order;
+    }
+  }
+
+  saveDB(db);
+  res.json({ success: true });
 });
 
 // 프로젝트 삭제 (하위 포함)
@@ -275,6 +297,21 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
       };
       db.reports.push(report);
       newReports.push(report);
+    } else if (ext === '.md') {
+      const report = {
+        id: uuidv4(),
+        projectId: req.params.id,
+        originalName,
+        type: 'markdown',
+        fileName: file.filename,
+        indexPath: file.filename,
+        date,
+        uploadedBy,
+        uploadedAt: new Date().toISOString(),
+        memo: ''
+      };
+      db.reports.push(report);
+      newReports.push(report);
     } else {
       const report = {
         id: uuidv4(),
@@ -307,6 +344,83 @@ app.delete('/api/reports/:id', (req, res) => {
   db.reports = db.reports.filter(r => r.id !== req.params.id);
   saveDB(db);
   res.json({ success: true });
+});
+
+// Markdown 렌더링 엔드포인트
+app.get('/api/reports/:id/render', (req, res) => {
+  const db = loadDB();
+  const report = db.reports.find(r => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
+  if (report.type !== 'markdown') return res.status(400).json({ error: 'Markdown 리포트가 아닙니다.' });
+
+  const filePath = path.join(REPORTS_DIR, report.fileName);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: '파일을 찾을 수 없습니다.' });
+
+  const mdContent = fs.readFileSync(filePath, 'utf-8');
+  const htmlContent = marked(mdContent);
+
+  const fullHtml = `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${report.originalName}</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      color: #1a1d26;
+      line-height: 1.7;
+    }
+    h1, h2, h3, h4 { margin-top: 1.5em; margin-bottom: 0.5em; }
+    h1 { font-size: 2em; border-bottom: 2px solid #e4e7ec; padding-bottom: 0.3em; }
+    h2 { font-size: 1.5em; border-bottom: 1px solid #e4e7ec; padding-bottom: 0.2em; }
+    code {
+      background: #f1f5f9;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+    }
+    pre {
+      background: #1e2330;
+      color: #e2e8f0;
+      padding: 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    pre code { background: transparent; padding: 0; color: inherit; }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 1em 0;
+    }
+    th, td {
+      border: 1px solid #e4e7ec;
+      padding: 8px 12px;
+      text-align: left;
+    }
+    th { background: #f8f9fb; font-weight: 600; }
+    blockquote {
+      border-left: 4px solid #4f8cff;
+      margin: 1em 0;
+      padding: 8px 16px;
+      background: #f0f7ff;
+      color: #374151;
+    }
+    img { max-width: 100%; border-radius: 8px; }
+    a { color: #4f8cff; }
+    ul, ol { padding-left: 1.5em; }
+    li { margin: 0.3em 0; }
+    hr { border: none; border-top: 1px solid #e4e7ec; margin: 2em 0; }
+  </style>
+</head>
+<body>${htmlContent}</body>
+</html>`;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(fullHtml);
 });
 
 // 리포트 메모 수정

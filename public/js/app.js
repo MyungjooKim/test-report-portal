@@ -93,15 +93,21 @@ function renderProjectList() {
 function renderTreeNodes(nodes, depth) {
   if (!nodes || nodes.length === 0) return '';
 
-  return nodes.map(p => {
+  return nodes.map((p, index) => {
     const isActive = p.id === currentProjectId;
     const hasChildren = p.children && p.children.length > 0;
     const indent = depth * 16;
     const isExpanded = isAncestorOfCurrent(p);
 
     let html = `
-      <li class="tree-item ${isActive ? 'active' : ''}" style="padding-left:${12 + indent}px" data-id="${p.id}">
+      <li class="tree-item ${isActive ? 'active' : ''}" style="padding-left:${12 + indent}px" data-id="${p.id}" data-parent="${p.parentId || ''}" draggable="true"
+        ondragstart="onDragStart(event, '${p.id}')"
+        ondragover="onDragOver(event)"
+        ondragenter="onDragEnter(event)"
+        ondragleave="onDragLeave(event)"
+        ondrop="onDrop(event, '${p.id}')">
         <div class="tree-item-row" onclick="selectProject('${p.id}')">
+          <span class="drag-handle" onmousedown="event.stopPropagation()">⠿</span>
           ${hasChildren ? `<span class="tree-toggle ${isExpanded ? 'expanded' : ''}" onclick="event.stopPropagation(); toggleTreeNode('${p.id}', this)">▶</span>` : '<span class="tree-toggle-spacer"></span>'}
           <span class="project-icon">${hasChildren ? '📁' : '📂'}</span>
           <span class="tree-name">${escapeHtml(p.name)}</span>
@@ -299,8 +305,9 @@ function renderDateGroups(grouped) {
         </div>
         <div class="report-items">
           ${reports.map(r => {
-            const typeIcon = r.type === 'folder' ? '📂' : '📄';
-            const typeBadge = r.type === 'folder' ? '<span class="type-badge">ZIP</span>' : '';
+            const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : '📄';
+            const typeBadge = r.type === 'folder' ? '<span class="type-badge">ZIP</span>' 
+              : r.type === 'markdown' ? '<span class="type-badge md">MD</span>' : '';
             return `
             <div class="report-item" onclick="viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')">
               <span class="ri-icon">${typeIcon}</span>
@@ -334,7 +341,11 @@ async function loadAndShowReport(projectId, reportId) {
   }
 
   if (report) {
-    currentReportUrl = `/uploads/${report.indexPath}`;
+    if (report.type === 'markdown') {
+      currentReportUrl = `/api/reports/${report.id}/render`;
+    } else {
+      currentReportUrl = `/uploads/${report.indexPath}`;
+    }
     document.getElementById('viewerTitle').textContent = report.originalName;
     document.getElementById('viewerFrame').src = currentReportUrl;
     showView('reportViewer');
@@ -380,7 +391,7 @@ function setupUploadZone() {
     e.preventDefault();
     zone.classList.remove('dragover');
     const files = Array.from(e.dataTransfer.files).filter(f =>
-      f.name.endsWith('.html') || f.name.endsWith('.zip')
+      f.name.endsWith('.html') || f.name.endsWith('.zip') || f.name.endsWith('.md')
     );
     addFiles(files);
   });
@@ -564,4 +575,99 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden'));
   }
+});
+
+// ===== Drag & Drop 순서 변경 =====
+let draggedProjectId = null;
+
+function onDragStart(e, id) {
+  draggedProjectId = id;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', id);
+  setTimeout(() => {
+    e.target.classList.add('dragging');
+  }, 0);
+}
+
+function onDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+}
+
+function onDragEnter(e) {
+  e.preventDefault();
+  const li = e.target.closest('.tree-item');
+  if (li && li.dataset.id !== draggedProjectId) {
+    li.classList.add('drag-over');
+  }
+}
+
+function onDragLeave(e) {
+  const li = e.target.closest('.tree-item');
+  if (li) li.classList.remove('drag-over');
+}
+
+function onDrop(e, targetId) {
+  e.preventDefault();
+  const li = e.target.closest('.tree-item');
+  if (li) li.classList.remove('drag-over');
+
+  if (!draggedProjectId || draggedProjectId === targetId) {
+    draggedProjectId = null;
+    return;
+  }
+
+  // 같은 부모 레벨에서만 순서 변경
+  const draggedNode = findProjectInTree(projectTree, draggedProjectId);
+  const targetNode = findProjectInTree(projectTree, targetId);
+
+  if (!draggedNode || !targetNode) { draggedProjectId = null; return; }
+
+  const draggedParent = draggedNode.parentId || null;
+  const targetParent = targetNode.parentId || null;
+
+  if (draggedParent !== targetParent) {
+    // 다른 부모면 무시 (같은 레벨끼리만 이동 가능)
+    draggedProjectId = null;
+    return;
+  }
+
+  // 해당 부모의 children 순서 재배치
+  const siblings = getSiblings(projectTree, draggedParent);
+  const draggedIdx = siblings.findIndex(p => p.id === draggedProjectId);
+  const targetIdx = siblings.findIndex(p => p.id === targetId);
+
+  if (draggedIdx === -1 || targetIdx === -1) { draggedProjectId = null; return; }
+
+  // 순서 변경: dragged를 target 위치로 이동
+  siblings.splice(draggedIdx, 1);
+  const newTargetIdx = siblings.findIndex(p => p.id === targetId);
+  siblings.splice(newTargetIdx + (draggedIdx < targetIdx ? 1 : 0), 0, draggedNode);
+
+  // 서버에 새 순서 저장
+  const orders = siblings.map((p, i) => ({ id: p.id, order: i }));
+  saveProjectOrder(orders);
+
+  draggedProjectId = null;
+}
+
+function getSiblings(tree, parentId) {
+  if (!parentId) return tree;
+  const parent = findProjectInTree(tree, parentId);
+  return parent ? parent.children : [];
+}
+
+async function saveProjectOrder(orders) {
+  await api('/api/projects/reorder', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orders })
+  });
+  await loadProjects();
+}
+
+document.addEventListener('dragend', (e) => {
+  document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+  document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+  draggedProjectId = null;
 });
