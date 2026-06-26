@@ -1,21 +1,51 @@
 // ===== State =====
-let projects = [];
+let projectTree = [];
 let currentProjectId = null;
 let currentReportUrl = null;
 let selectedFiles = [];
 
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
-  loadProjects();
   setupUploadZone();
 
-  // 오늘 날짜를 기본값으로
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
 
-  // 저장된 업로더 이름 복원
   const savedName = localStorage.getItem('uploaderName');
   if (savedName) document.getElementById('uploaderName').value = savedName;
+
+  // 브라우저 뒤로가기/앞으로가기
+  window.addEventListener('popstate', () => handleNavigation());
+
+  // 프로젝트 로드 후 URL 기반으로 초기 화면
+  loadProjects().then(() => handleNavigation());
 });
+
+// ===== Router =====
+function handleNavigation() {
+  const hash = window.location.hash || '';
+  const parts = hash.replace('#', '').split('/');
+
+  if (parts[0] === 'project' && parts[1]) {
+    const projectId = parts[1];
+    currentProjectId = projectId;
+    renderProjectList();
+
+    if (parts[2] === 'report' && parts[3]) {
+      loadAndShowReport(projectId, parts[3]);
+    } else {
+      showProjectView(projectId);
+    }
+  } else {
+    currentProjectId = null;
+    renderProjectList();
+    showView('dashboard');
+  }
+}
+
+function navigateTo(hash) {
+  history.pushState(null, '', hash);
+  handleNavigation();
+}
 
 // ===== API Helpers =====
 async function api(url, options = {}) {
@@ -25,29 +55,97 @@ async function api(url, options = {}) {
 
 // ===== Projects =====
 async function loadProjects() {
-  projects = await api('/api/projects');
+  projectTree = await api('/api/projects');
   renderProjectList();
   renderDashboard();
 }
 
+// 트리 구조를 flat 목록으로 펼치기 (검색 등에 사용)
+function flattenTree(tree) {
+  const result = [];
+  function walk(nodes) {
+    for (const node of nodes) {
+      result.push(node);
+      if (node.children && node.children.length > 0) walk(node.children);
+    }
+  }
+  walk(tree);
+  return result;
+}
+
+function findProjectInTree(tree, id) {
+  for (const node of tree) {
+    if (node.id === id) return node;
+    if (node.children) {
+      const found = findProjectInTree(node.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// 사이드바 트리 렌더링
 function renderProjectList() {
   const list = document.getElementById('projectList');
-  list.innerHTML = projects.map(p => `
-    <li class="${p.id === currentProjectId ? 'active' : ''}" onclick="selectProject('${p.id}')">
-      <span class="project-icon">📂</span>
-      <span>${escapeHtml(p.name)}</span>
-      <span class="report-count">${p.reportCount}</span>
-    </li>
-  `).join('');
+  list.innerHTML = renderTreeNodes(projectTree, 0);
+}
+
+function renderTreeNodes(nodes, depth) {
+  if (!nodes || nodes.length === 0) return '';
+
+  return nodes.map(p => {
+    const isActive = p.id === currentProjectId;
+    const hasChildren = p.children && p.children.length > 0;
+    const indent = depth * 16;
+    const isExpanded = isAncestorOfCurrent(p);
+
+    let html = `
+      <li class="tree-item ${isActive ? 'active' : ''}" style="padding-left:${12 + indent}px" data-id="${p.id}">
+        <div class="tree-item-row" onclick="selectProject('${p.id}')">
+          ${hasChildren ? `<span class="tree-toggle ${isExpanded ? 'expanded' : ''}" onclick="event.stopPropagation(); toggleTreeNode('${p.id}', this)">▶</span>` : '<span class="tree-toggle-spacer"></span>'}
+          <span class="project-icon">${hasChildren ? '📁' : '📂'}</span>
+          <span class="tree-name">${escapeHtml(p.name)}</span>
+          <span class="report-count">${p.totalReportCount}</span>
+          ${depth < 2 ? `<button class="btn-add-child" onclick="event.stopPropagation(); openNewProjectModal('${p.id}')" title="하위 폴더 추가">+</button>` : ''}
+        </div>
+      </li>
+    `;
+
+    if (hasChildren) {
+      const display = isExpanded ? 'block' : 'none';
+      html += `<ul class="tree-children" id="children-${p.id}" style="display:${display}">${renderTreeNodes(p.children, depth + 1)}</ul>`;
+    }
+
+    return html;
+  }).join('');
+}
+
+function isAncestorOfCurrent(node) {
+  if (!currentProjectId) return false;
+  if (node.id === currentProjectId) return true;
+  if (node.children) {
+    return node.children.some(child => isAncestorOfCurrent(child));
+  }
+  return false;
+}
+
+function toggleTreeNode(id, el) {
+  const childrenEl = document.getElementById(`children-${id}`);
+  if (!childrenEl) return;
+
+  const isVisible = childrenEl.style.display !== 'none';
+  childrenEl.style.display = isVisible ? 'none' : 'block';
+  el.classList.toggle('expanded', !isVisible);
 }
 
 function renderDashboard() {
   const stats = document.getElementById('dashboardStats');
-  const totalReports = projects.reduce((sum, p) => sum + p.reportCount, 0);
+  const allProjects = flattenTree(projectTree);
+  const totalReports = allProjects.reduce((sum, p) => sum + p.reportCount, 0);
 
   stats.innerHTML = `
     <div class="stat-card">
-      <div class="stat-value">${projects.length}</div>
+      <div class="stat-value">${allProjects.length}</div>
       <div class="stat-label">프로젝트</div>
     </div>
     <div class="stat-card">
@@ -56,9 +154,8 @@ function renderDashboard() {
     </div>
   `;
 
-  // 최근 업로드 (각 프로젝트에서 최신 날짜 기준)
   const recent = document.getElementById('recentReports');
-  const recentProjects = projects
+  const recentProjects = allProjects
     .filter(p => p.latestDate)
     .sort((a, b) => b.latestDate.localeCompare(a.latestDate))
     .slice(0, 5);
@@ -83,16 +180,97 @@ function renderDashboard() {
   `).join('');
 }
 
-async function selectProject(id) {
-  currentProjectId = id;
-  renderProjectList();
+function selectProject(id) {
+  navigateTo(`#project/${id}`);
+}
+
+async function showProjectView(id) {
   showView('projectView');
 
-  const project = projects.find(p => p.id === id);
-  document.getElementById('projectTitle').textContent = project.name;
+  const project = findProjectInTree(projectTree, id);
+  if (project) {
+    const breadcrumb = getProjectBreadcrumb(id);
+    document.getElementById('projectTitle').innerHTML = `
+      <span class="editable-title" ondblclick="startEditProjectName('${id}', this)">${escapeHtml(project.name)}</span>
+      <button class="btn-edit-name" onclick="startEditProjectName('${id}', this.previousElementSibling)" title="이름 수정">✏️</button>
+    `;
+    document.getElementById('projectBreadcrumb').innerHTML = breadcrumb
+      .map((b, i) => i < breadcrumb.length - 1
+        ? `<span class="breadcrumb-item" onclick="selectProject('${b.id}')">${escapeHtml(b.name)}</span><span class="breadcrumb-sep">/</span>`
+        : `<span class="breadcrumb-current">${escapeHtml(b.name)}</span>`
+      ).join('');
+  }
 
   const grouped = await api(`/api/projects/${id}/reports`);
   renderDateGroups(grouped);
+}
+
+function startEditProjectName(projectId, el) {
+  const project = findProjectInTree(projectTree, projectId);
+  if (!project) return;
+
+  const titleContainer = document.getElementById('projectTitle');
+  const currentName = project.name;
+
+  titleContainer.innerHTML = `
+    <input type="text" class="edit-name-input" id="editNameInput" value="${escapeHtml(currentName)}" 
+      onkeydown="handleEditNameKey(event, '${projectId}')" 
+      onblur="saveProjectName('${projectId}')">
+  `;
+
+  const input = document.getElementById('editNameInput');
+  input.focus();
+  input.select();
+}
+
+function handleEditNameKey(e, projectId) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    saveProjectName(projectId);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    showProjectView(projectId); // 편집 취소, 원래로 복원
+  }
+}
+
+async function saveProjectName(projectId) {
+  const input = document.getElementById('editNameInput');
+  if (!input) return;
+
+  const newName = input.value.trim();
+  if (!newName) {
+    showProjectView(projectId);
+    return;
+  }
+
+  const project = findProjectInTree(projectTree, projectId);
+  if (project && newName !== project.name) {
+    await api(`/api/projects/${projectId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName })
+    });
+    await loadProjects();
+  }
+
+  showProjectView(projectId);
+}
+
+function getProjectBreadcrumb(id) {
+  const path = [];
+  function find(nodes, target, trail) {
+    for (const node of nodes) {
+      const currentTrail = [...trail, { id: node.id, name: node.name }];
+      if (node.id === target) {
+        path.push(...currentTrail);
+        return true;
+      }
+      if (node.children && find(node.children, target, currentTrail)) return true;
+    }
+    return false;
+  }
+  find(projectTree, id, []);
+  return path;
 }
 
 function renderDateGroups(grouped) {
@@ -144,18 +322,33 @@ function renderDateGroups(grouped) {
 
 // ===== Viewer =====
 function viewReport(id, indexPath, originalName) {
-  currentReportUrl = `/uploads/${indexPath}`;
-  document.getElementById('viewerTitle').textContent = originalName;
-  document.getElementById('viewerFrame').src = currentReportUrl;
-  showView('reportViewer');
+  navigateTo(`#project/${currentProjectId}/report/${id}`);
+}
+
+async function loadAndShowReport(projectId, reportId) {
+  const grouped = await api(`/api/projects/${projectId}/reports`);
+  let report = null;
+  for (const date of Object.keys(grouped)) {
+    const found = grouped[date].find(r => r.id === reportId);
+    if (found) { report = found; break; }
+  }
+
+  if (report) {
+    currentReportUrl = `/uploads/${report.indexPath}`;
+    document.getElementById('viewerTitle').textContent = report.originalName;
+    document.getElementById('viewerFrame').src = currentReportUrl;
+    showView('reportViewer');
+  } else {
+    navigateTo(`#project/${projectId}`);
+  }
 }
 
 function goBackToProject() {
   document.getElementById('viewerFrame').src = '';
   if (currentProjectId) {
-    selectProject(currentProjectId);
+    navigateTo(`#project/${currentProjectId}`);
   } else {
-    showView('dashboard');
+    navigateTo('#');
   }
 }
 
@@ -186,7 +379,7 @@ function setupUploadZone() {
   zone.addEventListener('drop', (e) => {
     e.preventDefault();
     zone.classList.remove('dragover');
-    const files = Array.from(e.dataTransfer.files).filter(f => 
+    const files = Array.from(e.dataTransfer.files).filter(f =>
       f.name.endsWith('.html') || f.name.endsWith('.zip')
     );
     addFiles(files);
@@ -248,7 +441,7 @@ async function uploadFiles() {
     renderFileList();
     closeModal('uploadModal');
     await loadProjects();
-    selectProject(currentProjectId);
+    showProjectView(currentProjectId);
   } catch (e) {
     alert('업로드 실패: ' + e.message);
   } finally {
@@ -262,20 +455,33 @@ async function deleteReport(id) {
   if (!confirm('이 리포트를 삭제하시겠습니까?')) return;
   await api(`/api/reports/${id}`, { method: 'DELETE' });
   await loadProjects();
-  if (currentProjectId) selectProject(currentProjectId);
+  if (currentProjectId) showProjectView(currentProjectId);
 }
 
 async function deleteCurrentProject() {
-  if (!confirm('이 프로젝트와 모든 리포트를 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.')) return;
+  if (!confirm('이 프로젝트와 모든 하위 프로젝트/리포트를 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.')) return;
   await api(`/api/projects/${currentProjectId}`, { method: 'DELETE' });
   currentProjectId = null;
   await loadProjects();
-  showView('dashboard');
+  navigateTo('#');
 }
 
 // ===== Project Modal =====
-function openNewProjectModal() {
+let newProjectParentId = null;
+
+function openNewProjectModal(parentId) {
+  newProjectParentId = parentId || null;
   document.getElementById('newProjectName').value = '';
+
+  const label = document.getElementById('newProjectParentLabel');
+  if (parentId) {
+    const parent = findProjectInTree(projectTree, parentId);
+    label.textContent = `상위: ${parent ? parent.name : ''}`;
+    label.style.display = 'block';
+  } else {
+    label.style.display = 'none';
+  }
+
   openModal('newProjectModal');
   setTimeout(() => document.getElementById('newProjectName').focus(), 100);
 }
@@ -284,15 +490,23 @@ async function createProject() {
   const name = document.getElementById('newProjectName').value.trim();
   if (!name) return;
 
-  const project = await api('/api/projects', {
+  const body = { name };
+  if (newProjectParentId) body.parentId = newProjectParentId;
+
+  const result = await api('/api/projects', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name })
+    body: JSON.stringify(body)
   });
+
+  if (result.error) {
+    alert(result.error);
+    return;
+  }
 
   closeModal('newProjectModal');
   await loadProjects();
-  selectProject(project.id);
+  selectProject(result.id);
 }
 
 // ===== Upload Modal =====
@@ -309,6 +523,9 @@ function showView(viewId) {
   ['dashboard', 'projectView', 'reportViewer'].forEach(id => {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   });
+  if (viewId !== 'reportViewer') {
+    document.getElementById('viewerFrame').src = '';
+  }
 }
 
 // ===== Modal Helpers =====
@@ -336,7 +553,7 @@ function formatTime(isoStr) {
   return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
 }
 
-// Enter키로 프로젝트 생성
+// Enter키로 프로젝트 생성, Escape로 모달 닫기
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     const newProjectModal = document.getElementById('newProjectModal');

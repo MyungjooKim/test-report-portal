@@ -31,7 +31,7 @@ function saveDB(db) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
 }
 
-// Multer 설정 - zip과 html 모두 허용
+// Multer 설정
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, REPORTS_DIR),
   filename: (req, file, cb) => {
@@ -50,7 +50,7 @@ const upload = multer({
       cb(new Error('HTML 또는 ZIP 파일만 업로드 가능합니다.'));
     }
   },
-  limits: { fileSize: 200 * 1024 * 1024 } // 200MB
+  limits: { fileSize: 200 * 1024 * 1024 }
 });
 
 // 정적 파일
@@ -60,7 +60,6 @@ app.use(express.json());
 
 // ──────────── 헬퍼 ────────────
 
-// zip 파일 압축 해제 → 폴더로 저장, index.html 경로 반환
 function extractZip(zipPath) {
   const id = path.basename(zipPath, '.zip');
   const extractDir = path.join(REPORTS_DIR, id);
@@ -68,11 +67,8 @@ function extractZip(zipPath) {
 
   const zip = new AdmZip(zipPath);
   zip.extractAllTo(extractDir, true);
-
-  // zip 원본 삭제
   fs.unlinkSync(zipPath);
 
-  // index.html 찾기 (최상위 또는 한 단계 안)
   const indexPath = findIndexHtml(extractDir);
   return { extractDir: id, indexPath };
 }
@@ -81,13 +77,11 @@ function findIndexHtml(dir, depth = 0) {
   if (depth > 2) return null;
   const entries = fs.readdirSync(dir, { withFileTypes: true });
 
-  // 현재 디렉토리에서 index.html 찾기
   const htmlFile = entries.find(e => e.isFile() && e.name.toLowerCase() === 'index.html');
   if (htmlFile) {
     return path.relative(path.join(__dirname, 'uploads'), path.join(dir, htmlFile.name));
   }
 
-  // 서브 디렉토리 탐색
   for (const entry of entries) {
     if (entry.isDirectory()) {
       const found = findIndexHtml(path.join(dir, entry.name), depth + 1);
@@ -97,66 +91,12 @@ function findIndexHtml(dir, depth = 0) {
   return null;
 }
 
-// 디렉토리 재귀 삭제
 function rmDir(dirPath) {
   if (fs.existsSync(dirPath)) {
     fs.rmSync(dirPath, { recursive: true, force: true });
   }
 }
 
-// ──────────── API ────────────
-
-// 프로젝트 목록
-app.get('/api/projects', (req, res) => {
-  const db = loadDB();
-  const projects = db.projects.map(p => {
-    const reports = db.reports.filter(r => r.projectId === p.id);
-    const dates = [...new Set(reports.map(r => r.date))].sort().reverse();
-    return {
-      ...p,
-      reportCount: reports.length,
-      dates,
-      latestDate: dates[0] || null
-    };
-  });
-  res.json(projects);
-});
-
-// 프로젝트 생성
-app.post('/api/projects', (req, res) => {
-  const db = loadDB();
-  const { name } = req.body;
-  if (!name || !name.trim()) return res.status(400).json({ error: '프로젝트명을 입력하세요.' });
-
-  const project = {
-    id: uuidv4(),
-    name: name.trim(),
-    createdAt: new Date().toISOString()
-  };
-  db.projects.push(project);
-  saveDB(db);
-  res.json(project);
-});
-
-// 프로젝트 삭제
-app.delete('/api/projects/:id', (req, res) => {
-  const db = loadDB();
-  const project = db.projects.find(p => p.id === req.params.id);
-  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
-
-  // 관련 리포트 파일/폴더 삭제
-  const reports = db.reports.filter(r => r.projectId === req.params.id);
-  for (const r of reports) {
-    deleteReportFiles(r);
-  }
-
-  db.projects = db.projects.filter(p => p.id !== req.params.id);
-  db.reports = db.reports.filter(r => r.projectId !== req.params.id);
-  saveDB(db);
-  res.json({ success: true });
-});
-
-// 리포트 파일/폴더 삭제 헬퍼
 function deleteReportFiles(report) {
   if (report.type === 'folder') {
     rmDir(path.join(REPORTS_DIR, report.folderId));
@@ -166,6 +106,127 @@ function deleteReportFiles(report) {
   }
 }
 
+// 프로젝트의 depth 계산
+function getProjectDepth(db, projectId) {
+  let depth = 0;
+  let current = db.projects.find(p => p.id === projectId);
+  while (current && current.parentId) {
+    depth++;
+    current = db.projects.find(p => p.id === current.parentId);
+    if (depth > 10) break; // 무한루프 방지
+  }
+  return depth;
+}
+
+// 프로젝트와 모든 하위 프로젝트/리포트 삭제
+function deleteProjectRecursive(db, projectId) {
+  // 하위 프로젝트 찾기
+  const children = db.projects.filter(p => p.parentId === projectId);
+  for (const child of children) {
+    deleteProjectRecursive(db, child.id);
+  }
+
+  // 이 프로젝트의 리포트 파일 삭제
+  const reports = db.reports.filter(r => r.projectId === projectId);
+  for (const r of reports) {
+    deleteReportFiles(r);
+  }
+
+  // DB에서 제거
+  db.reports = db.reports.filter(r => r.projectId !== projectId);
+  db.projects = db.projects.filter(p => p.id !== projectId);
+}
+
+// 프로젝트 트리 구조 생성 (리포트 수 포함)
+function buildProjectTree(db, parentId = null) {
+  const children = db.projects
+    .filter(p => (p.parentId || null) === parentId)
+    .map(p => {
+      const reports = db.reports.filter(r => r.projectId === p.id);
+      const dates = [...new Set(reports.map(r => r.date))].sort().reverse();
+      const latestUpload = reports.length > 0
+        ? reports.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0].uploadedAt
+        : p.createdAt;
+
+      const childNodes = buildProjectTree(db, p.id);
+      // 하위 프로젝트의 리포트 수도 합산
+      const childReportCount = childNodes.reduce((sum, c) => sum + c.totalReportCount, 0);
+
+      return {
+        ...p,
+        reportCount: reports.length,
+        totalReportCount: reports.length + childReportCount,
+        dates,
+        latestDate: dates[0] || null,
+        latestUpload,
+        children: childNodes
+      };
+    });
+
+  // 최신 활동 기준 내림차순
+  children.sort((a, b) => new Date(b.latestUpload) - new Date(a.latestUpload));
+  return children;
+}
+
+// ──────────── API ────────────
+
+// 프로젝트 트리 구조 반환
+app.get('/api/projects', (req, res) => {
+  const db = loadDB();
+  const tree = buildProjectTree(db, null);
+  res.json(tree);
+});
+
+// 프로젝트 생성 (parentId 선택적)
+app.post('/api/projects', (req, res) => {
+  const db = loadDB();
+  const { name, parentId } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: '프로젝트명을 입력하세요.' });
+
+  // depth 체크 (max 3)
+  if (parentId) {
+    const parentDepth = getProjectDepth(db, parentId);
+    if (parentDepth >= 2) {
+      return res.status(400).json({ error: '최대 3단계까지만 생성할 수 있습니다.' });
+    }
+  }
+
+  const project = {
+    id: uuidv4(),
+    name: name.trim(),
+    parentId: parentId || null,
+    createdAt: new Date().toISOString()
+  };
+  db.projects.push(project);
+  saveDB(db);
+  res.json(project);
+});
+
+// 프로젝트 이름 수정
+app.patch('/api/projects/:id', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: '프로젝트명을 입력하세요.' });
+
+  project.name = name.trim();
+  saveDB(db);
+  res.json({ success: true, project });
+});
+
+// 프로젝트 삭제 (하위 포함)
+app.delete('/api/projects/:id', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+
+  deleteProjectRecursive(db, req.params.id);
+  saveDB(db);
+  res.json({ success: true });
+});
+
 // 특정 프로젝트의 리포트 목록 (날짜별 그룹)
 app.get('/api/projects/:id/reports', (req, res) => {
   const db = loadDB();
@@ -173,7 +234,6 @@ app.get('/api/projects/:id/reports', (req, res) => {
     .filter(r => r.projectId === req.params.id)
     .sort((a, b) => b.date.localeCompare(a.date) || new Date(b.uploadedAt) - new Date(a.uploadedAt));
 
-  // 날짜별 그룹핑
   const grouped = {};
   for (const r of reports) {
     if (!grouped[r.date]) grouped[r.date] = [];
@@ -183,7 +243,7 @@ app.get('/api/projects/:id/reports', (req, res) => {
   res.json(grouped);
 });
 
-// 리포트 업로드 (HTML 단일 파일 또는 ZIP)
+// 리포트 업로드
 app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
   const db = loadDB();
   const project = db.projects.find(p => p.id === req.params.id);
@@ -198,7 +258,6 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
     const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
 
     if (ext === '.zip') {
-      // ZIP → 폴더로 압축 해제
       const filePath = path.join(REPORTS_DIR, file.filename);
       const { extractDir, indexPath } = extractZip(filePath);
 
@@ -217,7 +276,6 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
       db.reports.push(report);
       newReports.push(report);
     } else {
-      // 단일 HTML
       const report = {
         id: uuidv4(),
         projectId: req.params.id,

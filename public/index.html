@@ -16,7 +16,7 @@
       <div class="nav-section">
         <div class="nav-section-title">프로젝트</div>
         <ul class="project-list" id="projectList"></ul>
-        <button class="btn-add-project" onclick="openNewProjectModal()">+ 새 프로젝트</button>
+        <button class="btn-add-project" onclick="openNewProjectModal(null)">+ 새 프로젝트</button>
       </div>
     </nav>
   </aside>
@@ -38,10 +38,13 @@
     <!-- 프로젝트 상세 (프로젝트 선택 시) -->
     <main class="main-content hidden" id="projectView">
       <div class="page-header">
-        <h2 id="projectTitle">프로젝트명</h2>
+        <div class="page-header-left">
+          <div id="projectBreadcrumb" class="breadcrumb"></div>
+          <h2 id="projectTitle">프로젝트명</h2>
+        </div>
         <div class="page-actions">
           <button class="btn btn-primary" onclick="openUploadModal()">📤 리포트 업로드</button>
-          <button class="btn btn-danger-outline" onclick="deleteCurrentProject()">🗑 프로젝트 삭제</button>
+          <button class="btn btn-danger-outline" onclick="deleteCurrentProject()">🗑 삭제</button>
         </div>
       </div>
       <div class="date-groups" id="dateGroups"></div>
@@ -69,6 +72,7 @@
         <div class="form-group">
           <label>프로젝트명</label>
           <input type="text" id="newProjectName" class="form-input" placeholder="예: Web Redirect 회귀 테스트">
+          <div id="newProjectParentLabel" class="form-hint" style="display:none"></div>
         </div>
       </div>
       <div class="modal-footer">
