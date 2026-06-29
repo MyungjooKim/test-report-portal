@@ -305,21 +305,29 @@ function renderDateGroups(grouped) {
         </div>
         <div class="report-items">
           ${reports.map(r => {
-            const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : '📄';
+            const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : r.type === 'gsheet' ? '📊' : '📄';
             const typeBadge = r.type === 'folder' ? '<span class="type-badge">ZIP</span>' 
-              : r.type === 'markdown' ? '<span class="type-badge md">MD</span>' : '';
+              : r.type === 'markdown' ? '<span class="type-badge md">MD</span>'
+              : r.type === 'gsheet' ? '<span class="type-badge gsheet">Sheets</span>' : '';
+            const dashBtn = (r.type === 'gsheet' || r.type === 'single' || r.type === 'markdown' || r.type === 'folder')
+              ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); toggleDashboard('${r.id}')" title="대시보드">📊</button>` : '';
+            const refreshBtn = r.type === 'gsheet' 
+              ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); refreshReport('${r.id}')" title="최신 데이터로 새로고침">🔄</button>` : '';
             return `
             <div class="report-item" onclick="viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')">
               <span class="ri-icon">${typeIcon}</span>
               <div class="ri-info">
                 <div class="ri-name">${escapeHtml(r.originalName)} ${typeBadge}</div>
-                <div class="ri-meta">${r.uploadedBy} · ${formatTime(r.uploadedAt)}</div>
+                <div class="ri-meta">${r.uploadedBy} · ${formatTime(r.uploadedAt)}${r.lastRefreshedAt ? ' · 🔄 ' + formatTime(r.lastRefreshedAt) : ''}</div>
               </div>
               <div class="ri-actions">
+                ${dashBtn}
+                ${refreshBtn}
                 <button class="btn-icon-sm" onclick="event.stopPropagation(); openReportDirect('${escapeAttr(r.indexPath)}')" title="새 탭에서 열기">↗</button>
                 <button class="btn-icon-sm danger" onclick="event.stopPropagation(); deleteReport('${r.id}')" title="삭제">🗑</button>
               </div>
             </div>
+            <div class="report-dashboard hidden" id="dashboard-${r.id}"></div>
           `}).join('')}
         </div>
       </div>
@@ -431,6 +439,7 @@ async function uploadFiles() {
   const btn = document.getElementById('uploadBtn');
   btn.disabled = true;
   btn.textContent = '업로드 중...';
+  showLoadingOverlay('파일을 업로드하고 있습니다...');
 
   const formData = new FormData();
   for (const f of selectedFiles) {
@@ -451,10 +460,13 @@ async function uploadFiles() {
     selectedFiles = [];
     renderFileList();
     closeModal('uploadModal');
+    hideLoadingOverlay();
+    showToast('✅ 업로드 완료', 'success');
     await loadProjects();
     showProjectView(currentProjectId);
   } catch (e) {
-    alert('업로드 실패: ' + e.message);
+    hideLoadingOverlay();
+    showToast('❌ 업로드 실패: ' + e.message, 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = '업로드';
@@ -467,6 +479,187 @@ async function deleteReport(id) {
   await api(`/api/reports/${id}`, { method: 'DELETE' });
   await loadProjects();
   if (currentProjectId) showProjectView(currentProjectId);
+}
+
+// ===== Report Dashboard =====
+async function toggleDashboard(reportId) {
+  const el = document.getElementById(`dashboard-${reportId}`);
+  if (!el) return;
+
+  // 이미 열려있으면 접기
+  if (!el.classList.contains('hidden')) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    return;
+  }
+
+  // 로딩 표시
+  el.classList.remove('hidden');
+  el.innerHTML = '<div class="dashboard-loading"><div class="loading-spinner-sm"></div> 통계 분석 중...</div>';
+
+  try {
+    const stats = await api(`/api/reports/${reportId}/stats`);
+
+    if (stats.total === 0) {
+      el.innerHTML = '<div class="dashboard-empty">결과 데이터를 찾을 수 없습니다.</div>';
+      return;
+    }
+
+    el.innerHTML = renderDashboardPanel(stats);
+  } catch (e) {
+    el.innerHTML = '<div class="dashboard-empty">통계 추출에 실패했습니다.</div>';
+  }
+}
+
+function renderDashboardPanel(stats) {
+  // Pass Rate 게이지 색상
+  const rateColor = stats.passRate >= 90 ? '#22c55e' : stats.passRate >= 70 ? '#f59e0b' : '#ef4444';
+  const execColor = stats.executionRate >= 80 ? '#22c55e' : stats.executionRate >= 50 ? '#f59e0b' : '#6b7280';
+
+  // 시트별 바 차트
+  const sheetsHtml = stats.sheets.length > 1 ? `
+    <div class="dash-section">
+      <div class="dash-section-title">시트별 결과</div>
+      <div class="dash-sheets">
+        ${stats.sheets.map(sh => {
+          const shExec = sh.pass + sh.fail;
+          const sheetRate = shExec > 0 ? Math.round((sh.pass / shExec) * 100) : 0;
+          const barColor = sheetRate >= 90 ? '#22c55e' : sheetRate >= 70 ? '#f59e0b' : '#ef4444';
+          return shExec > 0 ? `
+            <div class="dash-sheet-row">
+              <span class="dash-sheet-name">${escapeHtml(sh.name)}</span>
+              <div class="dash-bar-track">
+                <div class="dash-bar-fill" style="width:${sheetRate}%; background:${barColor}"></div>
+              </div>
+              <span class="dash-sheet-stat">${sh.pass}/${shExec} (${sheetRate}%)</span>
+            </div>
+          ` : '';
+        }).join('')}
+      </div>
+    </div>
+  ` : '';
+
+  // Fail 항목 리스트
+  const failHtml = stats.failItems.length > 0 ? `
+    <div class="dash-section">
+      <div class="dash-section-title">❌ Fail 항목 (${stats.fail}건)</div>
+      <div class="dash-fail-list">
+        ${stats.failItems.map(item => `
+          <div class="dash-fail-item">
+            <span class="dash-fail-sheet">${escapeHtml(item.sheet)}</span>
+            <span class="dash-fail-cells">${item.cells.map(c => escapeHtml(c)).join(' → ')}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  ` : '';
+
+  return `
+    <div class="dash-panel">
+      <div class="dash-summary">
+        <div class="dash-rate">
+          <div class="dash-rate-circle" style="--rate:${stats.passRate}; --color:${rateColor}">
+            <span class="dash-rate-value">${stats.passRate}%</span>
+          </div>
+          <div class="dash-rate-label">Pass Rate</div>
+        </div>
+        <div class="dash-rate">
+          <div class="dash-rate-circle" style="--rate:${stats.executionRate}; --color:${execColor}">
+            <span class="dash-rate-value">${stats.executionRate}%</span>
+          </div>
+          <div class="dash-rate-label">실행률 (${stats.executed}/${stats.total})</div>
+        </div>
+        <div class="dash-counts">
+          <div class="dash-count pass"><span class="dash-count-value">${stats.pass}</span><span class="dash-count-label">Pass</span></div>
+          <div class="dash-count fail"><span class="dash-count-value">${stats.fail}</span><span class="dash-count-label">Fail</span></div>
+          <div class="dash-count skip"><span class="dash-count-value">${stats.skip}</span><span class="dash-count-label">N/T</span></div>
+          <div class="dash-count total"><span class="dash-count-value">${stats.total}</span><span class="dash-count-label">Total</span></div>
+        </div>
+      </div>
+      ${sheetsHtml}
+      ${failHtml}
+    </div>
+  `;
+}
+
+// ===== Refresh Google Sheets =====
+async function refreshReport(id) {
+  // 버튼 로딩 상태
+  const btn = document.querySelector(`[onclick*="refreshReport('${id}')"]`);
+  if (btn) {
+    btn.classList.add('spinning');
+    btn.disabled = true;
+  }
+
+  showToast('🔄 최신 데이터를 가져오는 중...', 'loading');
+
+  try {
+    const result = await api(`/api/reports/${id}/refresh`, { method: 'POST' });
+    if (result.error) {
+      showToast(`❌ ${result.error}`, 'error');
+      return;
+    }
+    showToast('✅ 최신 데이터로 업데이트 완료', 'success');
+    await loadProjects();
+    if (currentProjectId) showProjectView(currentProjectId);
+  } catch (e) {
+    showToast('❌ 새로고침 실패', 'error');
+  } finally {
+    if (btn) {
+      btn.classList.remove('spinning');
+      btn.disabled = false;
+    }
+  }
+}
+
+// ===== Toast =====
+function showToast(message, type = 'info', duration = 3000) {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  container.appendChild(toast);
+
+  // 등장 애니메이션
+  requestAnimationFrame(() => toast.classList.add('show'));
+
+  // loading 타입이면 자동으로 안 사라짐 — 다음 토스트가 대체
+  if (type === 'loading') {
+    toast.dataset.loading = 'true';
+    return;
+  }
+
+  // 기존 loading 토스트 제거
+  container.querySelectorAll('[data-loading="true"]').forEach(el => el.remove());
+
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
+// ===== Loading Overlay =====
+function showLoadingOverlay(message) {
+  let overlay = document.getElementById('loadingOverlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'loadingOverlay';
+    overlay.className = 'loading-overlay';
+    overlay.innerHTML = `
+      <div class="loading-content">
+        <div class="loading-spinner"></div>
+        <div class="loading-message"></div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+  }
+  overlay.querySelector('.loading-message').textContent = message || '처리 중...';
+  overlay.classList.add('show');
+}
+
+function hideLoadingOverlay() {
+  const overlay = document.getElementById('loadingOverlay');
+  if (overlay) overlay.classList.remove('show');
 }
 
 async function deleteCurrentProject() {
@@ -526,12 +719,116 @@ function openUploadModal() {
   renderFileList();
   document.getElementById('uploadBtn').disabled = true;
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
+  switchUploadTab('file');
+  checkGoogleStatus();
   openModal('uploadModal');
 }
 
+let currentUploadTab = 'file';
+
+function switchUploadTab(tab) {
+  currentUploadTab = tab;
+  document.querySelectorAll('.upload-tab').forEach((el, i) => {
+    el.classList.toggle('active', (i === 0 && tab === 'file') || (i === 1 && tab === 'gsheet'));
+  });
+  document.getElementById('uploadTabFile').classList.toggle('active', tab === 'file');
+  document.getElementById('uploadTabGsheet').classList.toggle('active', tab === 'gsheet');
+
+  // 버튼 텍스트/활성화 변경
+  const btn = document.getElementById('uploadBtn');
+  if (tab === 'gsheet') {
+    btn.textContent = '가져오기';
+    btn.onclick = importGoogleSheet;
+    const url = document.getElementById('gsheetUrl').value.trim();
+    btn.disabled = !url;
+  } else {
+    btn.textContent = '업로드';
+    btn.onclick = uploadFiles;
+    btn.disabled = selectedFiles.length === 0;
+  }
+}
+
+// Google Sheets 관련
+async function checkGoogleStatus() {
+  const res = await api('/api/google/status');
+  const statusEl = document.getElementById('gsheetStatus');
+
+  if (res.connected) {
+    statusEl.innerHTML = `
+      <div class="gsheet-connected">
+        <span>✅ ${escapeHtml(res.user.name)} (${escapeHtml(res.user.email)}) 연결됨</span>
+        <button class="btn btn-sm btn-secondary" onclick="disconnectGoogle()">연결 해제</button>
+      </div>
+    `;
+  } else {
+    statusEl.innerHTML = `
+      <div class="gsheet-disconnected">
+        <p>Google 계정으로 로그인하면 Spreadsheet를 가져올 수 있습니다.</p>
+        <a href="/auth/google" class="btn btn-primary btn-sm">🔗 Google 로그인</a>
+      </div>
+    `;
+  }
+}
+
+async function disconnectGoogle() {
+  await api('/api/google/disconnect', { method: 'POST' });
+  checkGoogleStatus();
+}
+
+async function importGoogleSheet() {
+  const url = document.getElementById('gsheetUrl').value.trim();
+  if (!url || !currentProjectId) return;
+
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true;
+  btn.textContent = '가져오는 중...';
+  showLoadingOverlay('Google Spreadsheet를 불러오고 있습니다...');
+
+  const uploaderName = document.getElementById('uploaderName').value.trim() || '익명';
+  localStorage.setItem('uploaderName', uploaderName);
+
+  try {
+    const result = await api('/api/google/sheets/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        projectId: currentProjectId,
+        date: document.getElementById('uploadDate').value,
+        uploadedBy: uploaderName
+      })
+    });
+
+    if (result.error) {
+      hideLoadingOverlay();
+      showToast(`❌ ${result.error}`, 'error');
+      return;
+    }
+
+    closeModal('uploadModal');
+    hideLoadingOverlay();
+    showToast('✅ 스프레드시트 가져오기 완료', 'success');
+    await loadProjects();
+    showProjectView(currentProjectId);
+  } catch (e) {
+    hideLoadingOverlay();
+    showToast('❌ 가져오기 실패: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '가져오기';
+  }
+}
+
+// gsheet URL 입력 시 버튼 활성화
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'gsheetUrl' && currentUploadTab === 'gsheet') {
+    document.getElementById('uploadBtn').disabled = !e.target.value.trim();
+  }
+});
+
 // ===== View Switching =====
 function showView(viewId) {
-  ['dashboard', 'projectView', 'reportViewer'].forEach(id => {
+  ['dashboard', 'projectView', 'reportViewer', 'searchView'].forEach(id => {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   });
   if (viewId !== 'reportViewer') {
@@ -671,3 +968,115 @@ document.addEventListener('dragend', (e) => {
   document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
   draggedProjectId = null;
 });
+
+// ===== Search =====
+let searchTimeout = null;
+
+function handleSearchKeyup(e) {
+  const query = e.target.value.trim();
+
+  if (e.key === 'Escape') {
+    e.target.value = '';
+    // 이전 화면으로 복귀
+    if (currentProjectId) {
+      navigateTo(`#project/${currentProjectId}`);
+    } else {
+      navigateTo('#');
+    }
+    return;
+  }
+
+  // 디바운스 300ms
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(() => {
+    if (query.length >= 2) {
+      performSearch();
+    } else if (query.length === 0) {
+      if (currentProjectId) {
+        navigateTo(`#project/${currentProjectId}`);
+      } else {
+        navigateTo('#');
+      }
+    }
+  }, 300);
+}
+
+async function performSearch() {
+  const query = document.getElementById('globalSearchInput').value.trim();
+  if (query.length < 2) return;
+
+  const scope = document.getElementById('searchScope').value;
+  let url = `/api/search?q=${encodeURIComponent(query)}`;
+  if (scope) url += `&projectId=${scope}`;
+
+  const results = await api(url);
+  showView('searchView');
+
+  document.getElementById('searchTitle').textContent = `"${query}" 검색 결과 (${results.length}건)`;
+  renderSearchResults(results, query);
+
+  // 검색 스코프 셀렉트 업데이트
+  updateSearchScope();
+}
+
+function updateSearchScope() {
+  const select = document.getElementById('searchScope');
+  const allProjects = flattenTree(projectTree);
+  const currentValue = select.value;
+
+  select.innerHTML = `<option value="">전체 프로젝트</option>` +
+    allProjects.map(p => `<option value="${p.id}" ${p.id === currentValue ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
+}
+
+function renderSearchResults(results, query) {
+  const container = document.getElementById('searchResults');
+
+  if (results.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🔍</div>
+        <h3>검색 결과가 없습니다</h3>
+        <p>"${escapeHtml(query)}"에 해당하는 리포트를 찾을 수 없습니다.</p>
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = results.map(r => {
+    const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : '📄';
+    const snippetHtml = r.snippets && r.snippets.length > 0
+      ? `<div class="search-snippets">${r.snippets.map(s => `<span class="snippet">${highlightKeywords(escapeHtml(s), query)}</span>`).join('')}</div>`
+      : '';
+
+    return `
+      <div class="search-result-item" onclick="goToSearchResult('${r.projectId}', '${r.id}')">
+        <div class="search-result-header">
+          <span class="ri-icon">${typeIcon}</span>
+          <div class="search-result-info">
+            <div class="search-result-name">${highlightKeywords(escapeHtml(r.originalName), query)}</div>
+            <div class="search-result-meta">
+              <span class="search-project-badge">${escapeHtml(r.projectName)}</span>
+              · ${r.date} · ${r.uploadedBy}
+            </div>
+          </div>
+        </div>
+        ${snippetHtml}
+      </div>
+    `;
+  }).join('');
+}
+
+function highlightKeywords(text, query) {
+  const keywords = query.toLowerCase().split(/\s+/);
+  let result = text;
+  for (const kw of keywords) {
+    const regex = new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+    result = result.replace(regex, '<mark>$1</mark>');
+  }
+  return result;
+}
+
+function goToSearchResult(projectId, reportId) {
+  currentProjectId = projectId;
+  navigateTo(`#project/${projectId}/report/${reportId}`);
+}

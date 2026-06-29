@@ -7,6 +7,7 @@ RUN npm ci --production
 
 COPY server.js ./
 COPY public ./public
+COPY .env* ./
 
 EXPOSE 3000
 
