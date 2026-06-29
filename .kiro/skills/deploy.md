@@ -2,58 +2,43 @@
 inclusion: manual
 ---
 
-# Deploy Skill
+# deploy — 원격 서버 멱등 배포
 
-사용자가 "deploy", "서버에 올려줘" 등의 문구를 사용하면 이 스킬을 실행한다.
+레포 루트의 **`deploy.sh`**를 실행하는 래퍼 스킬이다.
+"deploy", "서버에 올려줘" 요청 시 사용.
 
-## 서버 정보
+## 동작 흐름
+1. **로컬**: uncommitted 변경이 있으면 커밋
+2. **로컬**: 현재 브랜치 push
+3. **로컬**: develop → main 머지 후 push (이미 반영됐으면 skip)
+4. **서버**: git fetch → git reset --hard origin/main (멱등 핵심)
+5. **서버**: docker build → docker stop/rm → docker run
+6. **서버**: 헬스체크 (/login 200)
 
-- **접속**: `ssh -i ~/aws-key/okrd-pi-server.pem ubuntu@131.186.17.216`
-- **OS**: Ubuntu (ARM)
-- **키 파일**: `~/aws-key/okrd-pi-server.pem`
+## 실행 방법
+```bash
+./deploy.sh ["커밋 메시지"]
+```
 
-## 프로세스
+## 설정 (환경변수 override)
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| DEPLOY_REMOTE_HOST | ubuntu@131.186.17.216 | 서버 주소 |
+| DEPLOY_REMOTE_DIR | /home/ubuntu/apps/test-report-portal | 서버 프로젝트 경로 |
+| DEPLOY_SSH_KEY | ~/aws-key/okrd-pi-server.pem | SSH 키 |
+| DEPLOY_APP_PORT | 6000 | 외부 포트 |
+| DEPLOY_CONTAINER_NAME | tr-portal | 컨테이너 이름 |
 
-### 1. 사전 확인
-- 현재 프로젝트에 커밋되지 않은 변경사항이 있는지 확인
-- 있으면 먼저 커밋/push를 권유
-- Dockerfile이 있는지 확인 (없으면 생성 제안)
+## 멱등성
+서버는 항상 origin/main 커밋에 reset --hard 되므로 N회 실행해도 동일 결과.
+데이터(Docker volume)와 .env(gitignored)는 보존된다.
 
-### 2. 서버 상태 확인
-- SSH로 서버에 접속하여 Docker 설치 여부 확인
-- 기존에 동일 앱이 실행 중인지 확인 (컨테이너 이름 기반)
-- 디스크 여유 공간 확인
+## 사전 조건
+- SSH 키 파일 존재 + 서버 접속 가능
+- 서버에 프로젝트 디렉토리가 git clone 되어 있음
+- 서버에 .env 파일이 설정되어 있음 (GOOGLE_CLIENT_ID 등)
 
-### 3. 배포 방식 결정
-- **Docker 사용 가능**: 서버에서 git pull → docker build → docker run
-- **Docker 미설치**: 서버에 Docker 설치를 제안하거나, node 직접 실행 방식 사용
-
-### 4. 배포 실행
-1. 서버에 SSH 접속
-2. 프로젝트 디렉토리 확인/생성 (`~/apps/{프로젝트명}`)
-3. GitHub에서 최신 코드 pull (또는 최초 clone)
-4. `.env` 파일이 필요하면 서버에 존재하는지 확인, 없으면 사용자에게 안내
-5. Docker 빌드: `docker build -t {프로젝트명} .`
-6. 기존 컨테이너 중지/제거: `docker stop {컨테이너명} && docker rm {컨테이너명}`
-7. 새 컨테이너 실행: `docker run -d --name {컨테이너명} --restart unless-stopped -p {포트}:{포트} -v {볼륨들} {이미지명}`
-8. 헬스체크: `curl -s http://localhost:{포트}` 로 응답 확인
-
-### 5. 사용자 확인
-- 배포 전에 다음을 사용자에게 보여주고 확인받는다:
-  - 배포 대상 서버 IP
-  - 사용할 포트
-  - 컨테이너 이름
-  - 기존 컨테이너 교체 여부
-- 배포 완료 후 접속 URL 안내
-
-### 6. 포트 규칙
-- 앱마다 고유 포트 사용
-- 기본: 3000번대부터 시작
-- 이미 사용 중인 포트는 `docker ps`로 확인 후 충돌 방지
-
-## 주의사항
-- SSH 키 파일 경로가 존재하는지 먼저 확인
-- 서버에 `.env` 파일은 직접 전송하지 않고, 사용자가 수동으로 설정하도록 안내
-- 배포 전 반드시 사용자 확인을 받는다
-- 실패 시 이전 컨테이너로 롤백 방법을 안내
-- 서버의 민감 정보(비밀번호 등)는 출력하지 않는다
+## 실패 시
+- SSH 실패: 키 경로/권한 확인
+- 머지 충돌: develop/main 수동 정리 후 재실행
+- 헬스체크 실패: docker logs 확인
