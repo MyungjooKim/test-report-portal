@@ -31,6 +31,7 @@
       </div>
     </nav>
     <div class="sidebar-footer">
+      <div class="user-info" id="userInfo"></div>
       <span class="version-label">v0.1.0</span>
     </div>
   </aside>
@@ -103,6 +104,12 @@
           <input type="text" id="newProjectName" class="form-input" placeholder="예: Web Redirect 회귀 테스트">
           <div id="newProjectParentLabel" class="form-hint" style="display:none"></div>
         </div>
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="newProjectPrivate">
+            <span>비공개 프로젝트 (나만 볼 수 있음)</span>
+          </label>
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeModal('newProjectModal')">취소</button>
@@ -140,9 +147,6 @@
 
         <!-- Google Sheets 탭 -->
         <div class="upload-tab-content" id="uploadTabGsheet">
-          <div id="gsheetAuth">
-            <div class="gsheet-status" id="gsheetStatus"></div>
-          </div>
           <div class="form-group">
             <label>Spreadsheet URL</label>
             <input type="text" id="gsheetUrl" class="form-input" placeholder="URL 또는 Spreadsheet ID">

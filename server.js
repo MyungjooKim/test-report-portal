@@ -82,9 +82,44 @@ const upload = multer({
 });
 
 // 정적 파일
-app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(REPORTS_DIR));
 app.use(express.json());
+
+// ──────────── 인증 미들웨어 ────────────
+
+// 로그인 페이지는 인증 없이 접근 가능
+app.get('/login', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+// 인증이 필요하지 않은 경로들
+const PUBLIC_PATHS = ['/auth/google', '/auth/google/callback', '/login', '/css/', '/js/'];
+
+function requireAuth(req, res, next) {
+  // 공개 경로는 통과
+  if (PUBLIC_PATHS.some(p => req.path.startsWith(p))) return next();
+
+  // 로그인 확인
+  if (req.session.googleUser) return next();
+
+  // API 요청이면 401
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: '로그인이 필요합니다.' });
+  }
+
+  // 그 외는 로그인 페이지로
+  res.redirect('/login');
+}
+
+app.use(requireAuth);
+
+// 인증된 사용자만 정적 파일 접근
+app.use(express.static(path.join(__dirname, 'public')));
+
+// 현재 사용자 정보 API
+app.get('/api/me', (req, res) => {
+  res.json(req.session.googleUser || null);
+});
 
 // ──────────── 헬퍼 ────────────
 
@@ -223,9 +258,11 @@ function deleteProjectRecursive(db, projectId) {
 }
 
 // 프로젝트 트리 구조 생성 (리포트 수 포함)
-function buildProjectTree(db, parentId = null) {
+function buildProjectTree(db, parentId = null, userEmail = null) {
   const children = db.projects
     .filter(p => (p.parentId || null) === parentId)
+    // private 프로젝트는 owner만 볼 수 있음
+    .filter(p => !p.visibility || p.visibility === 'public' || p.ownerId === userEmail)
     .map(p => {
       const reports = db.reports.filter(r => r.projectId === p.id);
       const dates = [...new Set(reports.map(r => r.date))].sort().reverse();
@@ -233,7 +270,7 @@ function buildProjectTree(db, parentId = null) {
         ? reports.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0].uploadedAt
         : p.createdAt;
 
-      const childNodes = buildProjectTree(db, p.id);
+      const childNodes = buildProjectTree(db, p.id, userEmail);
       const childReportCount = childNodes.reduce((sum, c) => sum + c.totalReportCount, 0);
 
       return {
@@ -261,14 +298,15 @@ function buildProjectTree(db, parentId = null) {
 // 프로젝트 트리 구조 반환
 app.get('/api/projects', (req, res) => {
   const db = loadDB();
-  const tree = buildProjectTree(db, null);
+  const userEmail = req.session.googleUser.email;
+  const tree = buildProjectTree(db, null, userEmail);
   res.json(tree);
 });
 
 // 프로젝트 생성 (parentId 선택적)
 app.post('/api/projects', (req, res) => {
   const db = loadDB();
-  const { name, parentId } = req.body;
+  const { name, parentId, visibility } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: '프로젝트명을 입력하세요.' });
 
   // depth 체크 (max 3)
@@ -283,6 +321,8 @@ app.post('/api/projects', (req, res) => {
     id: uuidv4(),
     name: name.trim(),
     parentId: parentId || null,
+    visibility: visibility || 'public', // 'public' 또는 'private'
+    ownerId: req.session.googleUser.email,
     createdAt: new Date().toISOString()
   };
   db.projects.push(project);

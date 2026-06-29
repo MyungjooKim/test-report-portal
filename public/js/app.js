@@ -16,9 +16,39 @@ document.addEventListener('DOMContentLoaded', () => {
   // 브라우저 뒤로가기/앞으로가기
   window.addEventListener('popstate', () => handleNavigation());
 
-  // 프로젝트 로드 후 URL 기반으로 초기 화면
+  // 사용자 정보 로드 + 프로젝트 로드
+  loadUserInfo();
   loadProjects().then(() => handleNavigation());
 });
+
+async function loadUserInfo() {
+  const user = await api('/api/me');
+  if (user) {
+    const el = document.getElementById('userInfo');
+    el.innerHTML = `
+      <div class="user-row">
+        <img class="user-avatar" src="${user.picture || ''}" alt="" referrerpolicy="no-referrer">
+        <span class="user-name">${escapeHtml(user.name)}</span>
+        <button class="btn-logout" onclick="logout()" title="로그아웃">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+        </button>
+      </div>
+    `;
+    // 업로더 이름 기본값 설정
+    if (!localStorage.getItem('uploaderName')) {
+      document.getElementById('uploaderName').value = user.name;
+    }
+  }
+}
+
+async function logout() {
+  await api('/api/google/disconnect', { method: 'POST' });
+  window.location.href = '/login';
+}
 
 // ===== Router =====
 function handleNavigation() {
@@ -110,7 +140,7 @@ function renderTreeNodes(nodes, depth) {
           <span class="drag-handle" onmousedown="event.stopPropagation()">⠿</span>
           ${hasChildren ? `<span class="tree-toggle ${isExpanded ? 'expanded' : ''}" onclick="event.stopPropagation(); toggleTreeNode('${p.id}', this)">▶</span>` : '<span class="tree-toggle-spacer"></span>'}
           <span class="project-icon">${hasChildren ? '📁' : '📂'}</span>
-          <span class="tree-name">${escapeHtml(p.name)}</span>
+          <span class="tree-name">${escapeHtml(p.name)}${p.visibility === 'private' ? ' 🔒' : ''}</span>
           <span class="report-count">${p.totalReportCount}</span>
           ${depth < 2 ? `<button class="btn-add-child" onclick="event.stopPropagation(); openNewProjectModal('${p.id}')" title="하위 폴더 추가">+</button>` : ''}
         </div>
@@ -694,7 +724,8 @@ async function createProject() {
   const name = document.getElementById('newProjectName').value.trim();
   if (!name) return;
 
-  const body = { name };
+  const isPrivate = document.getElementById('newProjectPrivate').checked;
+  const body = { name, visibility: isPrivate ? 'private' : 'public' };
   if (newProjectParentId) body.parentId = newProjectParentId;
 
   const result = await api('/api/projects', {
@@ -720,7 +751,6 @@ function openUploadModal() {
   document.getElementById('uploadBtn').disabled = true;
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
   switchUploadTab('file');
-  checkGoogleStatus();
   openModal('uploadModal');
 }
 

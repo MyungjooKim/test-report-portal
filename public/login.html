@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TR Portal - 로그인</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1e2330;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      color: #fff;
+    }
+    .login-card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 48px;
+      text-align: center;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      max-width: 400px;
+      width: 90%;
+    }
+    .login-logo {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .login-logo svg { flex-shrink: 0; }
+    .login-logo-text {
+      font-size: 28px;
+      font-weight: 800;
+      color: #1a1d26;
+    }
+    .login-logo-accent { color: #4f8cff; font-weight: 600; }
+    .login-subtitle {
+      font-size: 14px;
+      color: #6b7280;
+      margin-bottom: 32px;
+    }
+    .login-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 32px;
+      border: 1px solid #e4e7ec;
+      border-radius: 8px;
+      background: #fff;
+      color: #1a1d26;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-decoration: none;
+    }
+    .login-btn:hover {
+      border-color: #4f8cff;
+      box-shadow: 0 4px 12px rgba(79,140,255,0.15);
+    }
+    .login-btn img {
+      width: 20px;
+      height: 20px;
+    }
+    .login-footer {
+      margin-top: 24px;
+      font-size: 12px;
+      color: #9ca3af;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="login-logo">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+        <rect x="3" y="3" width="18" height="18" rx="4" fill="#4f8cff" opacity="0.15"/>
+        <path d="M7 12l3 3 7-7" stroke="#4f8cff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="login-logo-text">TR <span class="login-logo-accent">Portal</span></span>
+    </div>
+    <p class="login-subtitle">테스트 리포트 관리 포털</p>
+    <a href="/auth/google" class="login-btn">
+      <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google">
+      Google 계정으로 로그인
+    </a>
+    <div class="login-footer">팀원 Google 계정으로 로그인하세요</div>
+  </div>
+</body>
+</html>
