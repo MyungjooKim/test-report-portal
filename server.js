@@ -11,7 +11,7 @@ const FileStore = require('session-file-store')(session);
 const { google } = require('googleapis');
 const sheetStore = require('./lib/sheet-store');
 const { evaluateMetric } = require('./lib/metric-eval');
-const { computeStatsFromSheetData } = require('./lib/report-stats');
+const { computeStatsFromSheetData, collectFailItems } = require('./lib/report-stats');
 
 require('dotenv').config();
 
@@ -1078,6 +1078,97 @@ app.delete('/api/reports/:id/metrics/:mid', (req, res) => {
   }
   saveDB(db);
   res.json({ success: true });
+});
+
+// ── Fail 분석 및 결함 후보 (자동 생성 + 지문 캐시) ──
+// 대시보드 첫 열람 시 생성, Fail 목록이 바뀌면(refresh 등) 지문 불일치로 자동 재생성.
+// 분포 집계는 서버가 결정적으로 계산하고, AI 는 패턴 해석·결함 클러스터링만 담당.
+
+const _failAnalysisInFlight = new Map(); // reportId → Promise (동시 열람 시 중복 생성 방지)
+
+const FAIL_ANALYSIS_RULES = `당신은 QA 결함 분석가다. 테스트 결과서의 Fail 목록과 분포(서버 집계 — 정확함)를 받아 분석한다.
+
+출력 형식 (마크다운, 간결하게):
+### 집중 영역
+- 2~3줄. 어떤 시트/기능 영역에 Fail 이 집중되어 있는지 — 주어진 분포 수치만 인용.
+### 결함 후보 클러스터
+- 동일 원인의 결함으로 의심되는 TC 들을 묶고, 묶음마다 "TC ID 목록 — 근거 한 줄".
+- 단독 Fail 은 "개별 확인 필요"로 분리.
+### 수정 우선 대상
+- 1~3개. 영향 범위가 큰 순서로, 이유 한 줄씩.
+
+규칙: 주어진 데이터에 없는 내용을 추측하지 말 것. 수치는 분포 집계만 인용. 전체 200단어 이내.`;
+
+async function generateFailAnalysis(reportId, fails, fingerprint) {
+  // 결정적 분포 집계 — 시트별 / 기능(대분류 > 중분류)별
+  const bySheet = {};
+  const byGroup = {};
+  for (const f of fails) {
+    bySheet[f.sheet] = (bySheet[f.sheet] || 0) + 1;
+    const g = [f.cells[1], f.cells[2]].filter(Boolean).join(' > ') || '(미분류)';
+    byGroup[g] = (byGroup[g] || 0) + 1;
+  }
+
+  const Anthropic = require('@anthropic-ai/sdk');
+  const client = new Anthropic();
+  const resp = await client.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 2000,
+    thinking: { type: 'adaptive' },
+    system: FAIL_ANALYSIS_RULES,
+    messages: [{
+      role: 'user',
+      content: JSON.stringify({
+        분포_시트별: bySheet,
+        분포_기능별: byGroup,
+        fail_목록: fails.map(f => ({ 시트: f.sheet, tc: f.cells[0], 분류: [f.cells[1], f.cells[2]].filter(Boolean).join(' > '), 제목: f.cells[3] })),
+      }),
+    }],
+  });
+  const markdown = resp.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  if (!markdown) throw new Error('빈 분석 결과');
+
+  const analysis = { fingerprint, markdown, generatedAt: new Date().toISOString(), failCount: fails.length };
+  const db = loadDB();
+  const r = db.reports.find(x => x.id === reportId);
+  if (r) { r.failAnalysis = analysis; saveDB(db); }
+  return analysis;
+}
+
+app.get('/api/reports/:id/fail-analysis', async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY) return res.json({ disabled: true });
+  const db = loadDB();
+  const report = db.reports.find(r => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
+  if (report.type !== 'gsheet') return res.json({ disabled: true });
+  const sheetData = sheetStore.load(report.id);
+  if (!sheetData || !sheetData.sheets.length) return res.json({ disabled: true });
+
+  const fails = collectFailItems(sheetData);
+  if (fails.length === 0) {
+    if (report.failAnalysis) { delete report.failAnalysis; saveDB(db); }
+    return res.json({ none: true });
+  }
+
+  const crypto = require('crypto');
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(fails)).digest('hex');
+  if (req.query.force !== '1' && report.failAnalysis && report.failAnalysis.fingerprint === fingerprint) {
+    return res.json({ ok: true, cached: true, ...report.failAnalysis });
+  }
+
+  let job = _failAnalysisInFlight.get(report.id);
+  if (!job) {
+    job = generateFailAnalysis(report.id, fails, fingerprint)
+      .finally(() => _failAnalysisInFlight.delete(report.id));
+    _failAnalysisInFlight.set(report.id, job);
+  }
+  try {
+    const analysis = await job;
+    res.json({ ok: true, cached: false, ...analysis });
+  } catch (e) {
+    console.error('Fail 분석 생성 오류:', e.message);
+    res.status(502).json({ error: 'Fail 분석 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.' });
+  }
 });
 
 // LLM 컨텍스트용 시트 데이터 직렬화 — 상한 초과 시 요약 모드
