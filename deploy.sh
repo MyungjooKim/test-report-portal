@@ -99,7 +99,8 @@ log "헬스체크..."
 sleep 3
 HTTP_CODE=$($SSH "$REMOTE_HOST" "curl -s -o /dev/null -w '%{http_code}' http://localhost:${APP_PORT}/login" 2>/dev/null || echo "000")
 
-if [ "$HTTP_CODE" = "200" ]; then
+# 200=자체 로그인 화면 / 302=QA 통합 모드(INTEGRATED=1, tcgen 로그인으로 위임) — 둘 다 정상
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
   log "✅ 배포 완료!"
   log "   커밋: $DEPLOY_SHA"
   log "   URL: http://$(echo $REMOTE_HOST | cut -d@ -f2):${APP_PORT}"
