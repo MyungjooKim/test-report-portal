@@ -854,17 +854,21 @@ function renderDashboardPanel(stats, reportId, aiOn) {
     </div>
   ` : '';
 
-  // Fail 항목 리스트
+  // Fail 항목 리스트 — 기본 접힘, 클릭으로 펼치기 (항목이 많은 리포트 대응)
   const failHtml = stats.failItems.length > 0 ? `
     <div class="dash-section">
-      <div class="dash-section-title">❌ Fail 항목 (${stats.fail}건)</div>
-      <div class="dash-fail-list">
+      <button type="button" class="dash-fail-toggle" onclick="toggleFailList('${reportId}')">
+        ❌ Fail 항목 (${stats.fail}건)
+        <span class="fail-caret" id="fail-caret-${reportId}">▸ 펼쳐보기</span>
+      </button>
+      <div class="dash-fail-list hidden" id="fail-list-${reportId}">
         ${stats.failItems.map(item => `
           <div class="dash-fail-item">
             <span class="dash-fail-sheet">${escapeHtml(item.sheet)}</span>
             <span class="dash-fail-cells">${item.cells.map(c => escapeHtml(c)).join(' → ')}</span>
           </div>
         `).join('')}
+        ${stats.fail > stats.failItems.length ? `<div class="dash-fail-more">… 외 ${stats.fail - stats.failItems.length}건 (상위 ${stats.failItems.length}건만 표시 — 전체는 결과서에서 확인)</div>` : ''}
       </div>
     </div>
   ` : '';
@@ -899,6 +903,14 @@ function renderDashboardPanel(stats, reportId, aiOn) {
       ${aiOn ? renderAiSection(reportId) : ''}
     </div>
   `;
+}
+
+function toggleFailList(reportId) {
+  const list = document.getElementById(`fail-list-${reportId}`);
+  const caret = document.getElementById(`fail-caret-${reportId}`);
+  if (!list) return;
+  list.classList.toggle('hidden');
+  if (caret) caret.textContent = list.classList.contains('hidden') ? '▸ 펼쳐보기' : '▾ 접기';
 }
 
 // ===== Fail 분석 및 결함 후보 (자동 생성 — Fail 있을 때만) =====

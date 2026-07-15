@@ -1512,3 +1512,14 @@ mark {
 .fa-h:first-child { margin-top: 0; }
 .fa-li { padding-left: 6px; }
 .fa-p { margin: 2px 0; }
+
+/* Fail 항목 접기/펼치기 */
+.dash-fail-list.hidden { display: none; }
+.dash-fail-toggle {
+  border: none; background: none; cursor: pointer; padding: 0;
+  font-size: 13px; font-weight: 600; color: #334155;
+  display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+}
+.dash-fail-toggle:hover { color: #b91c1c; }
+.fail-caret { font-size: 11px; font-weight: 500; color: #94a3b8; }
+.dash-fail-more { font-size: 11px; color: #94a3b8; padding: 6px 4px 0; }
