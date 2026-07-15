@@ -887,7 +887,8 @@ function renderDashboardPanel(stats, reportId, aiOn) {
           <div class="dash-count pass"><span class="dash-count-value">${stats.pass}</span><span class="dash-count-label">Pass</span></div>
           <div class="dash-count fail"><span class="dash-count-value">${stats.fail}</span><span class="dash-count-label">Fail</span></div>
           <div class="dash-count skip"><span class="dash-count-value">${stats.skip}</span><span class="dash-count-label">N/T</span></div>
-          <div class="dash-count total"><span class="dash-count-value">${stats.total}</span><span class="dash-count-label">Total</span></div>
+          ${stats.na ? `<div class="dash-count na" title="해당 없음 — Total·실행률 모수에서 제외"><span class="dash-count-value">${stats.na}</span><span class="dash-count-label">N/A</span></div>` : ''}
+          <div class="dash-count total" title="Pass + Fail + N/T (N/A 제외)"><span class="dash-count-value">${stats.total}</span><span class="dash-count-label">Total</span></div>
         </div>
       </div>
       <div class="dash-section dash-custom-section hidden" id="custom-metrics-${reportId}"></div>

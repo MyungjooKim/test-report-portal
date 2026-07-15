@@ -11,6 +11,7 @@ const FileStore = require('session-file-store')(session);
 const { google } = require('googleapis');
 const sheetStore = require('./lib/sheet-store');
 const { evaluateMetric } = require('./lib/metric-eval');
+const { computeStatsFromSheetData } = require('./lib/report-stats');
 
 require('dotenv').config();
 
@@ -714,6 +715,19 @@ app.get('/api/reports/:id/stats', (req, res) => {
   const report = db.reports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
 
+  // gsheet: 원본 rows 기반 계산 (AI Q&A·커스텀 지표와 단일 데이터 소스) —
+  // HTML 휴리스틱 파싱의 헤더 미인식/N-T 누락 문제 해결. 구형 리포트는 아래 HTML 파서로 fallback
+  if (report.type === 'gsheet') {
+    const sheetData = sheetStore.load(report.id);
+    if (sheetData && sheetData.sheets && sheetData.sheets.length) {
+      try {
+        return res.json(computeStatsFromSheetData(sheetData));
+      } catch (e) {
+        console.error('rows 기반 통계 실패, HTML 파서로 fallback:', e.message);
+      }
+    }
+  }
+
   let filePath;
   if (report.type === 'folder') {
     filePath = path.join(REPORTS_DIR, report.indexPath);
@@ -774,7 +788,7 @@ function extractReportStats(content, type) {
         const resultColIdxs = [];
         $(sheetEl).find('table thead th, table tr:first-child th').each((idx, th) => {
           const hText = $(th).text().trim().toLowerCase();
-          if (['android', 'ios', 'result', '결과', 'pass', 'fail', 'p/f', 'mobile', 'web'].includes(hText)) {
+          if (isResultHeaderText(hText)) {
             resultColIdxs.push(idx);
           }
         });
@@ -799,7 +813,7 @@ function extractReportStats(content, type) {
               const rowCells = [];
               cells.each((ci, c) => { if (ci < 4) rowCells.push($(c).text().trim()); });
               result.failItems.push({ sheet: sheetName, cells: rowCells });
-            } else if (colsToCheck && (cls.includes('cell-skip') || isSkip(text))) {
+            } else if (cls.includes('cell-skip') || (colsToCheck ? isSkip(text) : isSkipStrict(text))) {
               sheetStat.skip++;
             }
           });
@@ -816,7 +830,7 @@ function extractReportStats(content, type) {
       const resultColIdxs = [];
       $('table thead th, table tr:first-child th').each((idx, th) => {
         const hText = $(th).text().trim().toLowerCase();
-        if (['android', 'ios', 'result', '결과', 'pass', 'fail', 'p/f', 'mobile', 'web'].includes(hText)) {
+        if (isResultHeaderText(hText)) {
           resultColIdxs.push(idx);
         }
       });
@@ -840,7 +854,7 @@ function extractReportStats(content, type) {
             const rowCells = [];
             cells.each((ci, c) => { if (ci < 4) rowCells.push($(c).text().trim()); });
             result.failItems.push({ sheet: '전체', cells: rowCells });
-          } else if (colsToCheck && (cls.includes('cell-skip') || isSkip(text))) {
+          } else if (cls.includes('cell-skip') || (colsToCheck ? isSkip(text) : isSkipStrict(text))) {
             singleStat.skip++;
           }
         });
@@ -874,6 +888,18 @@ function isPass(text) {
 
 function isFail(text) {
   return /^(fail|failed|f|실패)$/.test(text);
+}
+
+// 결과 컬럼 헤더 판별 — 부분일치('테스트 통과', '테스트 결과' 등), 기대결과 계열은 제외
+function isResultHeaderText(t) {
+  if (!t || t.length > 20) return false;
+  if (['android', 'ios', 'p/f', 'pf', 'pass/fail', 'mobile', 'web'].includes(t)) return true;
+  return /(결과|통과|판정|result|status)/.test(t) && !/(기대|예상|expected)/.test(t);
+}
+
+// 결과 컬럼 미인식 상태(모든 셀 스캔)에서 쓰는 엄격 skip 매칭 — '-' 는 오탐 위험이 커 제외
+function isSkipStrict(text) {
+  return /^(skip|skipped|n\/t|nt|n\/a|미수행)$/.test(text);
 }
 
 function isSkip(text) {
@@ -1605,7 +1631,7 @@ function getCellClass(value) {
   const v = (value || '').trim().toLowerCase();
   if (v === 'pass' || v === 'passed' || v === '통과' || v === 'p') return 'cell-pass';
   if (v === 'fail' || v === 'failed' || v === '실패' || v === 'f') return 'cell-fail';
-  if (v === 'skip' || v === 'skipped' || v === 'n/a' || v === '미수행' || v === '-') return 'cell-skip';
+  if (v === 'skip' || v === 'skipped' || v === 'n/t' || v === 'nt' || v === 'n/a' || v === '미수행' || v === '-') return 'cell-skip';
   return '';
 }
 

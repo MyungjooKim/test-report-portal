@@ -1489,3 +1489,6 @@ mark {
 .vj-group:hover { background: #e7efff; }
 .vj-count { color: #94a3b8; font-size: 11px; margin-left: 4px; }
 .vj-empty { font-size: 12px; color: #94a3b8; }
+
+/* N/A 카드 (해당 없음 — 모수 제외) */
+.dash-count.na .dash-count-value { color: #94a3b8; }
