@@ -7,6 +7,8 @@ let selectedFiles = [];
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
   setupUploadZone();
+  initSidebarResize();
+  initQaLauncher();
 
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
 
@@ -20,6 +22,125 @@ document.addEventListener('DOMContentLoaded', () => {
   loadUserInfo();
   loadProjects().then(() => handleNavigation());
 });
+
+// ===== Sidebar Resize =====
+const SIDEBAR_DEFAULT_WIDTH = 340;
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 560;
+
+function initSidebarResize() {
+  const sidebar = document.getElementById('sidebar');
+  const resizer = document.getElementById('sidebarResizer');
+  if (!sidebar || !resizer) return;
+
+  const saved = parseInt(localStorage.getItem('sidebarWidth'), 10);
+  if (saved >= SIDEBAR_MIN_WIDTH && saved <= SIDEBAR_MAX_WIDTH) {
+    sidebar.style.width = saved + 'px';
+  }
+
+  resizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebar.getBoundingClientRect().width;
+    document.body.classList.add('sidebar-resizing');
+
+    const onMove = (ev) => {
+      const w = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, startWidth + ev.clientX - startX));
+      sidebar.style.width = w + 'px';
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('sidebar-resizing');
+      localStorage.setItem('sidebarWidth', Math.round(sidebar.getBoundingClientRect().width));
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  resizer.addEventListener('dblclick', () => {
+    sidebar.style.width = SIDEBAR_DEFAULT_WIDTH + 'px';
+    localStorage.setItem('sidebarWidth', SIDEBAR_DEFAULT_WIDTH);
+  });
+}
+
+// ===== QA 통합 — 9-dot 앱 런처 (INTEGRATION_SPEC §6.2 앱 레지스트리, 단일 소스) =====
+let QA_CONFIG = null; // { integrated, tcgenUrl }
+const QA_CURRENT_APP = 'tr';
+
+async function initQaLauncher() {
+  QA_CONFIG = await api('/api/config');
+  if (QA_CONFIG && QA_CONFIG.integrated) {
+    const btn = document.getElementById('launcherBtn');
+    if (btn) btn.style.display = 'inline-flex';
+  }
+}
+
+function qaApps() {
+  const tcUrl = (QA_CONFIG && QA_CONFIG.tcgenUrl) || 'http://localhost:5001';
+  return [
+    { id: 'tc', name: 'Test Case Generator', desc: '기획서 → TC 자동 생성 · 갱신', color: '#3B5BDB', url: tcUrl },
+    { id: 'tr', name: 'Test Result Portal',  desc: '테스트 결과 리포트 관리',      color: '#0F9D58', url: '/' },
+    // 새 도구는 여기에 한 줄 추가
+  ];
+}
+
+function toggleLauncher(e) {
+  if (e) e.stopPropagation();
+  if (document.getElementById('launcherMenu')) { closeLauncher(); return; }
+  const overlay = document.createElement('div');
+  overlay.id = 'launcherOverlay';
+  overlay.onclick = closeLauncher;
+  const m = document.createElement('div');
+  m.id = 'launcherMenu';
+  const head = document.createElement('div');
+  head.className = 'lm-head';
+  head.textContent = 'PARAMETA · QA TOOLS';
+  m.appendChild(head);
+  const wrap = document.createElement('div');
+  wrap.className = 'lm-apps';
+  qaApps().forEach((appDef) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'lm-app';
+    const ic = document.createElement('span');
+    ic.className = 'ic';
+    ic.style.background = appDef.color;
+    ic.textContent = appDef.id.toUpperCase();
+    const txt = document.createElement('span');
+    const tt = document.createElement('span');
+    tt.className = 'tt';
+    tt.textContent = appDef.name;
+    const ds = document.createElement('span');
+    ds.className = 'ds';
+    ds.textContent = appDef.desc;
+    txt.appendChild(tt);
+    txt.appendChild(document.createElement('br'));
+    txt.appendChild(ds);
+    b.appendChild(ic);
+    b.appendChild(txt);
+    if (appDef.id === QA_CURRENT_APP) {
+      const cur = document.createElement('span');
+      cur.className = 'curmark';
+      cur.style.color = appDef.color;
+      cur.textContent = '● 사용 중';
+      b.appendChild(cur);
+    } else {
+      b.onclick = () => { window.location.href = appDef.url; };
+    }
+    wrap.appendChild(b);
+  });
+  m.appendChild(wrap);
+  document.body.appendChild(overlay);
+  document.body.appendChild(m);
+}
+
+function closeLauncher() {
+  ['launcherMenu', 'launcherOverlay'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  });
+}
 
 async function loadUserInfo() {
   const user = await api('/api/me');
@@ -45,9 +166,9 @@ async function loadUserInfo() {
   }
 }
 
-async function logout() {
-  await api('/api/google/disconnect', { method: 'POST' });
-  window.location.href = '/login';
+function logout() {
+  // 서버 /logout 이 세션 파기 + 통합 모드면 tcgen /logout 으로 연쇄 (양쪽 세션 종료)
+  window.location.href = '/logout';
 }
 
 // ===== Router =====
@@ -80,6 +201,16 @@ function navigateTo(hash) {
 // ===== API Helpers =====
 async function api(url, options = {}) {
   const res = await fetch(url, options);
+  if (res.status === 401) {
+    try {
+      const d = await res.clone().json();
+      if (d && d.need_login) {
+        // 통합 모드 세션 만료 — 서버 /login 이 tcgen 로그인으로 위임
+        window.location.href = '/login';
+        return null;
+      }
+    } catch (_) {}
+  }
   return res.json();
 }
 

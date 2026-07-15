@@ -30,12 +30,46 @@ body {
 
 /* ===== Sidebar ===== */
 .sidebar {
-  width: 260px;
+  width: 340px;
+  min-width: 240px;
+  max-width: 560px;
   background: var(--sidebar-bg);
   color: var(--sidebar-text);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  position: relative;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+}
+
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 2px;
+  width: 2px;
+  height: 100%;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.sidebar-resizer:hover::after,
+body.sidebar-resizing .sidebar-resizer::after {
+  background: var(--sidebar-active);
+}
+
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .sidebar-header {
@@ -69,6 +103,7 @@ body {
 .sidebar-nav {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 16px 12px;
 }
 
@@ -611,6 +646,7 @@ body {
 
 .tree-name {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1323,3 +1359,37 @@ mark {
   height: 16px;
   cursor: pointer;
 }
+
+/* ===== QA 통합 — 9-dot 앱 런처 (INTEGRATED 모드에서만 JS 로 표시) ===== */
+#launcherBtn {
+  display: none; /* initQaLauncher() 가 통합 모드에서 inline-flex 로 전환 */
+  position: fixed;
+  top: 12px;
+  right: 16px;
+  z-index: 900;
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+  background: #fff;
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+#launcherBtn:hover { background: #f3f4f6; }
+#launcherBtn .lgrid { display: grid; grid-template-columns: repeat(3, 4px); gap: 3px; }
+#launcherBtn .lgrid i { width: 4px; height: 4px; border-radius: 1px; background: #4b5563; display: block; }
+#launcherMenu { position: fixed; top: 60px; right: 16px; z-index: 1050; width: 300px; background: #fff; border: 1px solid #e4e7ec; border-radius: 14px; box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22); overflow: hidden; }
+#launcherOverlay { position: fixed; inset: 0; z-index: 1040; background: transparent; }
+.lm-head { padding: 14px 16px 10px; font-size: 11px; font-weight: 800; letter-spacing: 0.22em; color: #9ca3af; border-bottom: 1px solid #f3f4f6; }
+.lm-apps { padding: 8px; }
+.lm-app { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px; border: none; background: none; border-radius: 9px; text-align: left; cursor: pointer; }
+.lm-app:hover { background: #f5f7fb; }
+.lm-app .ic { width: 34px; height: 34px; border-radius: 9px; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; flex: none; }
+.lm-app .tt { font-size: 14px; font-weight: 600; color: #111827; }
+.lm-app .ds { font-size: 11.5px; color: #6b7280; }
+.lm-app .curmark { margin-left: auto; font-size: 10px; font-weight: 700; flex: none; }
+
+/* 런처(우상단 고정)와 페이지 헤더 버튼 겹침 방지 */
+.page-header { padding-right: 52px; }
