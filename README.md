@@ -8,10 +8,17 @@
 - **프로젝트 트리 구조** — 최대 3 depth 계층 폴더, 드래그앤드롭 순서 변경
 - **Google Sheets 연동** — URL/ID로 가져오기, 새로고침으로 최신 데이터 반영
 - **리포트 대시보드** — Pass Rate, 실행률, 시트별 통계, Fail 목록 자동 생성
+- **🤖 리포트 AI Q&A** (v0.4.0) — Sheets 리포트에 자연어로 질문 (Claude, 스트리밍).
+  수치 질문은 AI 가 계산 정의를 만들고 **서버가 계산**해 답하므로 환각 없음
+- **📌 커스텀 통계 카드** (v0.4.0) — AI 답변의 계산 결과를 대시보드에 고정.
+  저장되는 것은 숫자가 아니라 **계산식**이라 시트 새로고침 시 자동 재계산
+- **QA 통합 SSO** (v0.3.0) — `INTEGRATED=1` 이면 TC Generator 로그인 하나로 사용,
+  우상단 9-dot 런처로 도구 전환, 로그아웃도 양쪽 동시
 - **검색** — 파일명, 헤딩, 테이블 내용 기반 키워드 검색 + 프로젝트 스코프 필터
 - **Google OAuth 로그인** — 포털 전체 인증, 비공개 프로젝트 지원
 - **브라우저 네비게이션** — 뒤로가기/앞으로가기, URL 공유 가능
 - **Markdown 뷰어** — .md 파일을 렌더링된 HTML로 표시
+- **사이드바 리사이즈** — 드래그로 폭 조절 (더블클릭 초기화)
 
 ## 기술 스택
 
@@ -52,6 +59,16 @@ GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
 INTEGRATED=1
 TCGEN_URL=http://localhost:5001          # 서버 대 서버 검증용 (Docker: http://host.docker.internal:5001)
 TCGEN_PUBLIC_URL=http://localhost:5001   # 브라우저 리다이렉트용 (미설정 시 TCGEN_URL, 운영: https://tc.rgrg.im)
+
+# 리포트 AI Q&A (선택) — 미설정 시 AI 기능이 UI 에 노출되지 않음
+# tcgen 과 같은 Anthropic API 키를 공유한다
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+## 테스트
+
+```bash
+npm test   # lib/metric-eval 계산기 단위 테스트 (node --test)
 ```
 
 ### QA 통합 모드 (INTEGRATED=1)

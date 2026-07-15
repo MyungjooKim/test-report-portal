@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.4.0] - 2026-07-15
+
+### Added — 리포트 AI Q&A + 커스텀 통계 카드
+- **AI 에게 질문**: Sheets 리포트 대시보드에서 자연어로 결과 데이터 질의 (Claude 기반, 스트리밍 답변, 추천 질문 칩)
+- **계산식 기반 커스텀 지표**: 수치 질문은 AI 가 계산 정의(필터+집계)를 만들고 **숫자는 서버가 계산** (환각 차단).
+  답변의 계산 결과를 "📌 대시보드에 추가"하면 기본 통계 카드 옆에 영구 카드로 — 시트 새로고침 시 자동 재계산
+- 커스텀 카드 삭제 (AI 추가 카드 한정, 확인 다이얼로그)
+- 시트 원본 rows 보존 (`data/sheets/{id}.json`) — 가져오기/새로고침 시 저장, 리포트 삭제 연동
+- `lib/metric-eval` 계산기 + 단위 테스트 (`npm test`)
+- 신규 env: `ANTHROPIC_API_KEY` (미설정 시 AI 기능 자동 비노출)
+
+### Fixed
+- Dockerfile 에 `lib/` 복사 누락
+
+## [0.3.0 ~ 0.3.1] - 2026-07-15
+
+### Added — QA 통합 (TC Generator SSO)
+- `INTEGRATED=1` 모드: 자체 Google 로그인 대신 **tcgen 세션 신뢰** — 로그인은 tcgen 으로 위임,
+  세션 검증은 tcgen `/whoami` 쿠키 포워딩 (5분마다 재검증 — 교차 로그아웃 전파)
+- 우상단 **9-dot 앱 런처** (TC Generator ↔ TR Portal 전환)
+- 서버 주도 `/logout`: 포털 세션 파기 → tcgen 로그아웃 연쇄 (양쪽 동시 종료)
+- Google Sheets 가져오기/새로고침이 통합 로그인 토큰으로 동작 (tcgen `/whoami/token` 연동 — 재로그인 불필요)
+- 사이드바 폭 드래그 리사이즈 (240~560px, localStorage 저장, 더블클릭 초기화)
+- 신규 env: `INTEGRATED`, `TCGEN_URL`(서버 검증용), `TCGEN_PUBLIC_URL`(브라우저용)
+
+### Changed
+- `INTEGRATED` 미설정 시 기존 자체 로그인 동작 그대로 (배포 회귀 없음)
+- deploy.sh 헬스체크가 통합 모드의 /login 302 도 정상으로 판정
+
 ## [0.2.0] - 2026-06-29
 
 ### Added
