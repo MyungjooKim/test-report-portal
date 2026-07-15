@@ -92,3 +92,13 @@ test('통계 — 다중 결과 컬럼 (Android/iOS) 각각 카운트', () => {
   assert.equal(r.skip, 1);
   assert.equal(r.total, 4);
 });
+
+test('collectFailItems — 전체 Fail 수집 (캡 없음)', () => {
+  const { collectFailItems } = require('../lib/report-stats');
+  const rows = [];
+  for (let i = 1; i <= 25; i++) rows.push([`TC-${i}`, '그룹A', '기능B', `케이스${i}`, '', 'FAIL']);
+  rows.push(['TC-99', '그룹A', '기능B', '통과케이스', '', 'PASS']);
+  const fails = collectFailItems({ sheets: [{ name: 'S', header: H, rows }] });
+  assert.equal(fails.length, 25); // 통계는 20건 캡, 분석용은 전체
+  assert.deepEqual(fails[0].cells, ['TC-1', '그룹A', '기능B', '케이스1']);
+});

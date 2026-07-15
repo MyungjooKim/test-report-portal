@@ -820,6 +820,7 @@ async function toggleDashboard(reportId, reportType) {
     const aiOn = reportType === 'gsheet' && QA_CONFIG && QA_CONFIG.aiEnabled;
     el.innerHTML = renderDashboardPanel(stats, reportId, aiOn);
     if (reportType === 'gsheet') loadCustomMetrics(reportId);
+    if (aiOn && stats.fail > 0) loadFailAnalysis(reportId);
   } catch (e) {
     el.innerHTML = '<div class="dashboard-empty">통계 추출에 실패했습니다.</div>';
   }
@@ -853,17 +854,21 @@ function renderDashboardPanel(stats, reportId, aiOn) {
     </div>
   ` : '';
 
-  // Fail 항목 리스트
+  // Fail 항목 리스트 — 기본 접힘, 클릭으로 펼치기 (항목이 많은 리포트 대응)
   const failHtml = stats.failItems.length > 0 ? `
     <div class="dash-section">
-      <div class="dash-section-title">❌ Fail 항목 (${stats.fail}건)</div>
-      <div class="dash-fail-list">
+      <button type="button" class="dash-fail-toggle" onclick="toggleFailList('${reportId}')">
+        ❌ Fail 항목 (${stats.fail}건)
+        <span class="fail-caret" id="fail-caret-${reportId}">▸ 펼쳐보기</span>
+      </button>
+      <div class="dash-fail-list hidden" id="fail-list-${reportId}">
         ${stats.failItems.map(item => `
           <div class="dash-fail-item">
             <span class="dash-fail-sheet">${escapeHtml(item.sheet)}</span>
             <span class="dash-fail-cells">${item.cells.map(c => escapeHtml(c)).join(' → ')}</span>
           </div>
         `).join('')}
+        ${stats.fail > stats.failItems.length ? `<div class="dash-fail-more">… 외 ${stats.fail - stats.failItems.length}건 (상위 ${stats.failItems.length}건만 표시 — 전체는 결과서에서 확인)</div>` : ''}
       </div>
     </div>
   ` : '';
@@ -894,9 +899,63 @@ function renderDashboardPanel(stats, reportId, aiOn) {
       <div class="dash-section dash-custom-section hidden" id="custom-metrics-${reportId}"></div>
       ${sheetsHtml}
       ${failHtml}
+      ${aiOn && stats.fail > 0 ? `<div class="dash-section fail-analysis" id="fail-analysis-${reportId}"></div>` : ''}
       ${aiOn ? renderAiSection(reportId) : ''}
     </div>
   `;
+}
+
+function toggleFailList(reportId) {
+  const list = document.getElementById(`fail-list-${reportId}`);
+  const caret = document.getElementById(`fail-caret-${reportId}`);
+  if (!list) return;
+  list.classList.toggle('hidden');
+  if (caret) caret.textContent = list.classList.contains('hidden') ? '▸ 펼쳐보기' : '▾ 접기';
+}
+
+// ===== Fail 분석 및 결함 후보 (자동 생성 — Fail 있을 때만) =====
+
+async function loadFailAnalysis(reportId, force) {
+  const el = document.getElementById(`fail-analysis-${reportId}`);
+  if (!el) return;
+  el.innerHTML = `
+    <div class="dash-section-title">🔬 Fail 분석 및 결함 후보</div>
+    <div class="fa-loading"><div class="loading-spinner-sm"></div> 결함 패턴 분석 중… ${force ? '' : '(첫 분석은 10초 정도 걸립니다)'}</div>`;
+  try {
+    const d = await api(`/api/reports/${reportId}/fail-analysis${force ? '?force=1' : ''}`);
+    if (!d || d.disabled || d.none) { el.innerHTML = ''; return; }
+    if (d.error) {
+      el.innerHTML = `
+        <div class="dash-section-title">🔬 Fail 분석 및 결함 후보</div>
+        <div class="fa-error">⚠️ ${escapeHtml(d.error)}
+          <button type="button" class="fa-refresh" onclick="loadFailAnalysis('${reportId}')">재시도</button>
+        </div>`;
+      return;
+    }
+    el.innerHTML = `
+      <div class="dash-section-title">🔬 Fail 분석 및 결함 후보
+        <span class="fa-meta">Fail ${d.failCount}건 · ${formatTime(d.generatedAt)} 분석</span>
+        <button type="button" class="fa-refresh" onclick="loadFailAnalysis('${reportId}', true)" title="다시 분석">↻ 다시 분석</button>
+      </div>
+      <div class="fa-body">${renderFaMarkdown(d.markdown)}</div>`;
+  } catch (_) {
+    el.innerHTML = `
+      <div class="dash-section-title">🔬 Fail 분석 및 결함 후보</div>
+      <div class="fa-error">⚠️ 분석을 불러오지 못했습니다.
+        <button type="button" class="fa-refresh" onclick="loadFailAnalysis('${reportId}')">재시도</button>
+      </div>`;
+  }
+}
+
+// 분석 결과용 초경량 마크다운 렌더 (###, **, - 만 지원 — 전체 escapeHtml 선적용)
+function renderFaMarkdown(md) {
+  return String(md || '').split('\n').map((line) => {
+    const esc = escapeHtml(line).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    if (/^###\s+/.test(line)) return `<div class="fa-h">${esc.replace(/^###\s+/, '')}</div>`;
+    if (/^-\s+/.test(line)) return `<div class="fa-li">• ${esc.replace(/^-\s+/, '')}</div>`;
+    if (!line.trim()) return '';
+    return `<div class="fa-p">${esc}</div>`;
+  }).join('');
 }
 
 // ===== AI Q&A + 커스텀 지표 (report-ai-qa) =====
