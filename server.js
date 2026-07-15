@@ -154,8 +154,19 @@ const upload = multer({
   limits: { fileSize: 200 * 1024 * 1024 }
 });
 
+// 정적 파일 캐시 정책 — html/css/js 는 no-cache(항상 재검증, ETag 로 미변경 시 304).
+// 배포 후 브라우저가 구버전 app.js 를 계속 쓰거나, 시트 새로고침(동일 파일명 덮어쓰기) 후
+// 구버전 리포트 HTML 이 보이는 문제 방지.
+const STATIC_OPTS = {
+  setHeaders: (res, filePath) => {
+    if (/\.(html|css|js|svg)$/i.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  },
+};
+
 // 정적 파일
-app.use('/uploads', express.static(REPORTS_DIR));
+app.use('/uploads', express.static(REPORTS_DIR, STATIC_OPTS));
 app.use(express.json());
 
 // ──────────── 인증 미들웨어 ────────────
@@ -235,7 +246,7 @@ async function requireAuth(req, res, next) {
 app.use(requireAuth);
 
 // 인증된 사용자만 정적 파일 접근
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), STATIC_OPTS));
 
 // 현재 사용자 정보 API
 app.get('/api/me', (req, res) => {
