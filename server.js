@@ -39,7 +39,10 @@ function createOAuth2Client() {
 // ──────────── QA 통합 (INTEGRATION_SPEC §5.2) ────────────
 // INTEGRATED=1 일 때만 동작 — 미설정 시 기존 자체 로그인 그대로 (배포 회귀 방지)
 const INTEGRATED = process.env.INTEGRATED === '1';
+// TCGEN_URL: 서버 대 서버 검증용 (Docker 내부에서는 host.docker.internal 등)
+// TCGEN_PUBLIC_URL: 브라우저 리다이렉트·런처용 (미설정 시 TCGEN_URL 사용)
 const TCGEN_URL = (process.env.TCGEN_URL || 'http://localhost:5001').replace(/\/$/, '');
+const TCGEN_PUBLIC_URL = (process.env.TCGEN_PUBLIC_URL || TCGEN_URL).replace(/\/$/, '');
 
 // tcgen /whoami 로 세션 검증 — 브라우저 쿠키를 서버 대 서버로 포워딩
 function verifyTcgenSession(cookieHeader) {
@@ -124,24 +127,44 @@ app.use(express.json());
 
 // 로그인 페이지 — 통합 모드면 tcgen 로그인으로 위임
 app.get('/login', (req, res) => {
-  if (INTEGRATED) return res.redirect(TCGEN_URL + '/login');
+  if (INTEGRATED) return res.redirect(TCGEN_PUBLIC_URL + '/login');
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+// 로그아웃 — 포털 세션 파기 후 통합 모드면 tcgen 로그아웃까지 연쇄 (양쪽 세션 종료)
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie('connect.sid');
+    if (INTEGRATED) return res.redirect(TCGEN_PUBLIC_URL + '/logout');
+    res.redirect('/login');
+  });
 });
 
 // 인증이 필요하지 않은 경로들 — 통합 모드에서는 자체 OAuth 경로를 공개하지 않음
 const PUBLIC_PATHS = INTEGRATED
-  ? ['/login', '/css/', '/js/']
-  : ['/auth/google', '/auth/google/callback', '/login', '/css/', '/js/'];
+  ? ['/login', '/logout', '/css/', '/js/']
+  : ['/auth/google', '/auth/google/callback', '/login', '/logout', '/css/', '/js/'];
+
+// 통합 세션 캐시 재검증 주기 — tcgen 쪽 로그아웃이 포털에 전파되는 최대 지연
+const SSO_REVERIFY_MS = 5 * 60 * 1000;
 
 async function requireAuth(req, res, next) {
   // 공개 경로는 통과
   if (PUBLIC_PATHS.some(p => req.path.startsWith(p))) return next();
 
-  // 로그인 확인 (통합 모드에서도 최초 1회 검증 후 세션에 캐시)
-  if (req.session.googleUser) return next();
-
-  // 통합 모드: tcgen 세션을 신뢰 (포트 무관 쿠키 공유 / 서브도메인 쿠키)
-  if (INTEGRATED) {
+  if (req.session.googleUser) {
+    // 자체 로그인 세션이거나 비통합 모드면 그대로 신뢰
+    if (!INTEGRATED || !req.session.googleUser.integrated) return next();
+    // 통합 세션은 주기적으로 tcgen 세션 생존을 재확인 (교차 로그아웃 전파)
+    if ((req.session.ssoVerifiedAt || 0) + SSO_REVERIFY_MS > Date.now()) return next();
+    const who = await verifyTcgenSession(req.headers.cookie);
+    if (who) {
+      req.session.ssoVerifiedAt = Date.now();
+      return next();
+    }
+    delete req.session.googleUser; // tcgen 에서 로그아웃됨 → 포털 세션도 무효화
+  } else if (INTEGRATED) {
+    // 통합 모드: tcgen 세션을 신뢰 (포트 무관 쿠키 공유 / 서브도메인 쿠키)
     const who = await verifyTcgenSession(req.headers.cookie);
     if (who) {
       req.session.googleUser = {
@@ -150,21 +173,22 @@ async function requireAuth(req, res, next) {
         picture: who.picture || '',
         integrated: true,
       };
+      req.session.ssoVerifiedAt = Date.now();
       return next();
     }
-    if (req.path.startsWith('/api/')) {
-      return res.status(401).json({ error: '로그인이 필요합니다.', need_login: true });
-    }
-    return res.redirect(TCGEN_URL + '/login');
   }
 
-  // API 요청이면 401
+  // API 요청이면 401 (통합 모드는 need_login 으로 프런트 리다이렉트 유도)
   if (req.path.startsWith('/api/')) {
-    return res.status(401).json({ error: '로그인이 필요합니다.' });
+    return res.status(401).json(
+      INTEGRATED
+        ? { error: '로그인이 필요합니다.', need_login: true }
+        : { error: '로그인이 필요합니다.' }
+    );
   }
 
   // 그 외는 로그인 페이지로
-  res.redirect('/login');
+  res.redirect(INTEGRATED ? TCGEN_PUBLIC_URL + '/login' : '/login');
 }
 
 app.use(requireAuth);
@@ -177,9 +201,9 @@ app.get('/api/me', (req, res) => {
   res.json(req.session.googleUser || null);
 });
 
-// QA 통합 설정 — 프런트 9-dot 런처가 사용
+// QA 통합 설정 — 프런트 9-dot 런처가 사용 (브라우저용 URL)
 app.get('/api/config', (req, res) => {
-  res.json({ integrated: INTEGRATED, tcgenUrl: TCGEN_URL });
+  res.json({ integrated: INTEGRATED, tcgenUrl: TCGEN_PUBLIC_URL });
 });
 
 // ──────────── 헬퍼 ────────────

@@ -166,14 +166,9 @@ async function loadUserInfo() {
   }
 }
 
-async function logout() {
-  await api('/api/google/disconnect', { method: 'POST' });
-  // 통합 모드: tcgen 세션까지 함께 끊어야 진짜 로그아웃 (아니면 /whoami 로 재인증됨)
-  if (QA_CONFIG && QA_CONFIG.integrated) {
-    window.location.href = QA_CONFIG.tcgenUrl + '/logout';
-    return;
-  }
-  window.location.href = '/login';
+function logout() {
+  // 서버 /logout 이 세션 파기 + 통합 모드면 tcgen /logout 으로 연쇄 (양쪽 세션 종료)
+  window.location.href = '/logout';
 }
 
 // ===== Router =====
