@@ -174,10 +174,16 @@ app.get('/logout', (req, res) => {
   });
 });
 
+// 파비콘 — /favicon.ico 자동 요청(리포트 새 탭 등)도 SVG 로 응답
+app.get('/favicon.ico', (req, res) => {
+  res.type('image/svg+xml');
+  res.sendFile(path.join(__dirname, 'public', 'favicon.svg'));
+});
+
 // 인증이 필요하지 않은 경로들 — 통합 모드에서는 자체 OAuth 경로를 공개하지 않음
 const PUBLIC_PATHS = INTEGRATED
-  ? ['/login', '/logout', '/css/', '/js/']
-  : ['/auth/google', '/auth/google/callback', '/login', '/logout', '/css/', '/js/'];
+  ? ['/login', '/logout', '/css/', '/js/', '/favicon']
+  : ['/auth/google', '/auth/google/callback', '/login', '/logout', '/css/', '/js/', '/favicon'];
 
 // 통합 세션 캐시 재검증 주기 — tcgen 쪽 로그아웃이 포털에 전파되는 최대 지연
 const SSO_REVERIFY_MS = 5 * 60 * 1000;
@@ -1556,6 +1562,7 @@ function generateSheetHtml(title, allData, sourceUrl) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtmlServer(title)}</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 24px; color: #1a1d26; }
     h1 { font-size: 1.5em; margin-bottom: 4px; }
