@@ -1,0 +1,65 @@
+{
+  "version": "2.0",
+  "lastUpdated": "2026-07-07T05:57:47.985Z",
+  "activeFeatures": [
+    "js"
+  ],
+  "primaryFeature": "js",
+  "features": {
+    "js": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-07-07T05:42:01.038Z",
+        "lastUpdated": "2026-07-07T05:57:47.985Z"
+      },
+      "lastFile": "/Users/myungjookim/_claude26/git-projects/tr_ui/public/js/app.js"
+    }
+  },
+  "pipeline": {
+    "currentPhase": 1,
+    "level": "Dynamic",
+    "phaseHistory": []
+  },
+  "session": {
+    "startedAt": "2026-07-07T05:14:19.710Z",
+    "onboardingCompleted": false,
+    "lastActivity": "2026-07-07T05:57:47.985Z"
+  },
+  "history": [
+    {
+      "timestamp": "2026-07-07T05:42:01.038Z",
+      "feature": "js",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-07T05:42:28.384Z",
+      "feature": "js",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-07T05:45:20.631Z",
+      "feature": "js",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-07T05:57:35.540Z",
+      "feature": "js",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-07T05:57:47.985Z",
+      "feature": "js",
+      "phase": "do",
+      "action": "updated"
+    }
+  ]
+}

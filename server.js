@@ -9,6 +9,8 @@ const { v4: uuidv4 } = require('uuid');
 const session = require('express-session');
 const FileStore = require('session-file-store')(session);
 const { google } = require('googleapis');
+const sheetStore = require('./lib/sheet-store');
+const { evaluateMetric } = require('./lib/metric-eval');
 
 require('dotenv').config();
 
@@ -233,9 +235,13 @@ app.get('/api/me', (req, res) => {
   res.json(req.session.googleUser || null);
 });
 
-// QA 통합 설정 — 프런트 9-dot 런처가 사용 (브라우저용 URL)
+// QA 통합 설정 — 프런트 9-dot 런처가 사용 (브라우저용 URL). aiEnabled = AI Q&A 기능 노출 여부
 app.get('/api/config', (req, res) => {
-  res.json({ integrated: INTEGRATED, tcgenUrl: TCGEN_PUBLIC_URL });
+  res.json({
+    integrated: INTEGRATED,
+    tcgenUrl: TCGEN_PUBLIC_URL,
+    aiEnabled: !!process.env.ANTHROPIC_API_KEY,
+  });
 });
 
 // ──────────── 헬퍼 ────────────
@@ -595,6 +601,7 @@ app.delete('/api/reports/:id', (req, res) => {
   if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
 
   deleteReportFiles(report);
+  sheetStore.remove(report.id);
   db.reports = db.reports.filter(r => r.id !== req.params.id);
   saveDB(db);
   res.json({ success: true });
@@ -925,6 +932,9 @@ app.post('/api/reports/:id/refresh', async (req, res) => {
     report.searchIndex = extractSearchIndex(filePath, 'html');
     report.lastRefreshedAt = new Date().toISOString();
 
+    // AI Q&A / 커스텀 지표용 원본 rows 보존 (report-ai-qa)
+    sheetStore.save(report.id, allData);
+
     saveDB(db);
     res.json({ success: true, report });
   } catch (e) {
@@ -934,6 +944,245 @@ app.post('/api/reports/:id/refresh', async (req, res) => {
     }
     res.status(500).json({ error: '새로고침 실패: ' + e.message });
   }
+});
+
+// ──────────── AI Q&A + 커스텀 지표 (report-ai-qa) ────────────
+
+const MAX_CUSTOM_METRICS = 8;       // 리포트당 커스텀 카드 상한
+const CHAT_MAX_HISTORY = 10;        // 대화 이력 상한 (최근 N개)
+const CHAT_MAX_QUESTION = 1000;     // 질문 길이 상한 (자)
+const CTX_MAX_ROWS_PER_SHEET = 1500;
+const CTX_MAX_BYTES = 300 * 1024;   // 컨텍스트 직렬화 상한
+
+// 커스텀 지표 목록 — 정의를 시트 데이터로 평가해 계산값과 함께 반환
+app.get('/api/reports/:id/metrics', (req, res) => {
+  const db = loadDB();
+  const report = db.reports.find(r => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
+
+  const metrics = report.customMetrics || [];
+  const sheetData = metrics.length > 0 ? sheetStore.load(report.id) : null;
+  const items = metrics.map(m => {
+    const result = sheetData ? evaluateMetric(sheetData, m) : { ok: false, error: '시트 데이터 없음 (새로고침 필요)' };
+    return {
+      id: m.id,
+      label: m.label,
+      display: result.ok ? result.display : null,
+      percent: result.ok ? result.percent : null,
+      error: result.ok ? null : result.error,
+    };
+  });
+  res.json({ metrics: items });
+});
+
+// 커스텀 지표 추가 — 저장 전에 evaluate 로 정의 검증
+app.post('/api/reports/:id/metrics', (req, res) => {
+  const db = loadDB();
+  const report = db.reports.find(r => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
+
+  report.customMetrics = report.customMetrics || [];
+  if (report.customMetrics.length >= MAX_CUSTOM_METRICS) {
+    return res.status(400).json({ error: `커스텀 지표는 리포트당 최대 ${MAX_CUSTOM_METRICS}개입니다.` });
+  }
+
+  const def = req.body || {};
+  if (typeof def.label !== 'string' || !def.label.trim() || def.label.length > 80) {
+    return res.status(400).json({ error: 'label 이 올바르지 않습니다 (1~80자).' });
+  }
+  const sheetData = sheetStore.load(report.id);
+  if (!sheetData) return res.status(400).json({ error: '시트 데이터가 없습니다. 리포트를 새로고침해 주세요.' });
+
+  const result = evaluateMetric(sheetData, def);
+  if (!result.ok) return res.status(400).json({ error: `계산 정의가 유효하지 않습니다: ${result.error}` });
+
+  const metric = {
+    id: uuidv4(),
+    label: def.label.trim(),
+    sheet: def.sheet || null,
+    filter: def.filter || [],
+    agg: def.agg,
+    of: def.of || [],
+    createdBy: (req.session.googleUser && req.session.googleUser.name) || '익명',
+    createdAt: new Date().toISOString(),
+  };
+  report.customMetrics.push(metric);
+  saveDB(db);
+  res.json({ success: true, metric: { id: metric.id, label: metric.label, display: result.display, percent: result.percent } });
+});
+
+// 커스텀 지표 삭제 (AI 로 추가된 카드 한정 — 기본 통계 카드는 이 목록에 없음)
+app.delete('/api/reports/:id/metrics/:mid', (req, res) => {
+  const db = loadDB();
+  const report = db.reports.find(r => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
+  const before = (report.customMetrics || []).length;
+  report.customMetrics = (report.customMetrics || []).filter(m => m.id !== req.params.mid);
+  if (report.customMetrics.length === before) {
+    return res.status(404).json({ error: '지표를 찾을 수 없습니다.' });
+  }
+  saveDB(db);
+  res.json({ success: true });
+});
+
+// LLM 컨텍스트용 시트 데이터 직렬화 — 상한 초과 시 요약 모드
+function buildSheetContext(report, sheetData) {
+  const full = {
+    report: report.originalName,
+    sheets: sheetData.sheets.map(s => ({
+      name: s.name,
+      header: s.header,
+      rowCount: s.rows.length,
+      rows: s.rows.slice(0, CTX_MAX_ROWS_PER_SHEET),
+    })),
+  };
+  const serialized = JSON.stringify(full);
+  if (serialized.length <= CTX_MAX_BYTES && sheetData.sheets.every(s => s.rows.length <= CTX_MAX_ROWS_PER_SHEET)) {
+    return { text: serialized, summarized: false };
+  }
+  // 요약 모드: 헤더 + 컬럼별 고유값 상위 50개 + 행 수 (계산은 evaluator 가 전체 데이터로 수행)
+  const summary = {
+    report: report.originalName,
+    note: '행 수가 많아 요약만 제공. 수치는 반드시 define_metric 도구로 계산할 것.',
+    sheets: sheetData.sheets.map(s => ({
+      name: s.name,
+      header: s.header,
+      rowCount: s.rows.length,
+      columnValues: s.header.map((h, i) => {
+        const uniq = [...new Set(s.rows.map(r => String(r[i] == null ? '' : r[i]).trim()).filter(v => v))];
+        return { col: h, uniqueCount: uniq.length, samples: uniq.slice(0, 50) };
+      }),
+    })),
+  };
+  return { text: JSON.stringify(summary), summarized: true };
+}
+
+const METRIC_CONDITION_SCHEMA = {
+  type: 'object',
+  properties: {
+    col: { type: 'string', description: '시트 header 에 있는 컬럼명 그대로' },
+    op: { type: 'string', enum: ['eq', 'in', 'contains', 'not_empty'] },
+    value: {
+      anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }, { type: 'null' }],
+      description: 'eq/contains: 문자열, in: 문자열 배열, not_empty: null',
+    },
+  },
+  required: ['col', 'op', 'value'],
+  additionalProperties: false,
+};
+
+const DEFINE_METRIC_TOOL = {
+  name: 'define_metric',
+  description: '시트 데이터에 대한 수치 계산 정의. 개수/비율/퍼센트 등 수량 질문에는 반드시 이 도구를 사용한다. 직접 세지 않는다. count=filter 만족 행 수, ratio=(filter∧of 만족 행)/(filter 만족 행). filter 가 빈 배열이면 전체 행이 분모.',
+  strict: true,
+  input_schema: {
+    type: 'object',
+    properties: {
+      label: { type: 'string', description: '지표의 짧은 한국어 이름 (예: IMPLEMENTED 중 Pass 비율)' },
+      sheet: { type: ['string', 'null'], description: '대상 시트명. null 이면 전체 시트 합산' },
+      filter: { type: 'array', items: METRIC_CONDITION_SCHEMA },
+      agg: { type: 'string', enum: ['count', 'ratio'] },
+      of: { type: 'array', items: METRIC_CONDITION_SCHEMA, description: 'agg=ratio 일 때 분자 조건. count 면 빈 배열' },
+    },
+    required: ['label', 'sheet', 'filter', 'agg', 'of'],
+    additionalProperties: false,
+  },
+};
+
+const CHAT_SYSTEM_RULES = `당신은 QA 테스트 결과서 분석 도우미다. 아래 리포트 컨텍스트(시트 데이터)만 근거로 답한다.
+
+규칙:
+- 개수·비율·퍼센트 등 수량 질문에는 반드시 define_metric 도구를 사용한다. 절대 직접 세거나 어림하지 않는다.
+- 도구 결과(display 값)를 그대로 인용해 한국어로 간결하게 답한다.
+- 요약·원인 분석 같은 서술형 질문은 도구 없이 데이터를 근거로 답한다.
+- 컨텍스트에 없는 내용은 "이 결과서에서 확인할 수 없습니다"라고 답한다.
+- 답변은 간결하게. 불필요한 서론 없이 결론부터.`;
+
+function sseSend(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+// AI Q&A — SSE 스트리밍 (text / metric / done / error 이벤트)
+app.post('/api/reports/:id/chat', async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({ error: 'AI 기능이 설정되지 않았습니다.' });
+  }
+  const db = loadDB();
+  const report = db.reports.find(r => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
+  const sheetData = sheetStore.load(report.id);
+  if (!sheetData || !sheetData.sheets.length) {
+    return res.status(400).json({ error: '시트 데이터가 없습니다. 리포트를 새로고침해 주세요.' });
+  }
+
+  // 대화 이력 정제 — 최근 N개, 역할/길이 제한
+  const history = (Array.isArray(req.body && req.body.messages) ? req.body.messages : [])
+    .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
+    .slice(-CHAT_MAX_HISTORY)
+    .map(m => ({ role: m.role, content: m.content.slice(0, CHAT_MAX_QUESTION) }));
+  if (history.length === 0 || history[history.length - 1].role !== 'user') {
+    return res.status(400).json({ error: '질문이 없습니다.' });
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  const Anthropic = require('@anthropic-ai/sdk');
+  const client = new Anthropic();
+  const context = buildSheetContext(report, sheetData);
+  const system = [
+    { type: 'text', text: CHAT_SYSTEM_RULES },
+    { type: 'text', text: `리포트 컨텍스트:\n${context.text}`, cache_control: { type: 'ephemeral' } },
+  ];
+  const messages = history.map(m => ({ role: m.role, content: m.content }));
+
+  try {
+    // 도구 루프 — 최대 3회 (define_metric 계산 → 결과 재주입)
+    for (let turn = 0; turn < 3; turn++) {
+      const stream = client.messages.stream({
+        model: 'claude-opus-4-8',
+        max_tokens: 4096,
+        thinking: { type: 'adaptive' },
+        system,
+        tools: [DEFINE_METRIC_TOOL],
+        messages,
+      });
+      stream.on('text', (delta) => sseSend(res, 'text', { delta }));
+      const final = await stream.finalMessage();
+
+      messages.push({ role: 'assistant', content: final.content });
+
+      if (final.stop_reason !== 'tool_use') break;
+
+      const toolResults = [];
+      for (const block of final.content) {
+        if (block.type !== 'tool_use') continue;
+        const result = evaluateMetric(sheetData, block.input);
+        if (result.ok) {
+          sseSend(res, 'metric', {
+            definition: block.input,
+            computed: { display: result.display, percent: result.percent, numerator: result.numerator, denominator: result.denominator },
+          });
+          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(result) });
+        } else {
+          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result.error, is_error: true });
+        }
+      }
+      messages.push({ role: 'user', content: toolResults });
+    }
+    if (context.summarized) {
+      sseSend(res, 'text', { delta: '\n\n(행 수가 많아 요약 컨텍스트로 답변했습니다. 수치는 전체 데이터로 계산됩니다.)' });
+    }
+    sseSend(res, 'done', {});
+  } catch (e) {
+    console.error('AI chat error:', e.message);
+    sseSend(res, 'error', { message: 'AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' });
+  }
+  res.end();
 });
 
 // Markdown 렌더링 엔드포인트
@@ -1174,6 +1423,9 @@ app.post('/api/google/sheets/import', async (req, res) => {
 
     db.reports.push(report);
     saveDB(db);
+
+    // AI Q&A / 커스텀 지표용 원본 rows 보존 (report-ai-qa)
+    sheetStore.save(report.id, allData);
 
     res.json({ success: true, report });
   } catch (e) {

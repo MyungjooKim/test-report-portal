@@ -471,7 +471,7 @@ function renderDateGroups(grouped) {
               : r.type === 'markdown' ? '<span class="type-badge md">MD</span>'
               : r.type === 'gsheet' ? '<span class="type-badge gsheet">Sheets</span>' : '';
             const dashBtn = (r.type === 'gsheet' || r.type === 'single' || r.type === 'markdown' || r.type === 'folder')
-              ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); toggleDashboard('${r.id}')" title="대시보드">📊</button>` : '';
+              ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); toggleDashboard('${r.id}', '${r.type}')" title="대시보드">📊</button>` : '';
             const refreshBtn = r.type === 'gsheet' 
               ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); refreshReport('${r.id}')" title="최신 데이터로 새로고침">🔄</button>` : '';
             return `
@@ -643,7 +643,7 @@ async function deleteReport(id) {
 }
 
 // ===== Report Dashboard =====
-async function toggleDashboard(reportId) {
+async function toggleDashboard(reportId, reportType) {
   const el = document.getElementById(`dashboard-${reportId}`);
   if (!el) return;
 
@@ -666,13 +666,15 @@ async function toggleDashboard(reportId) {
       return;
     }
 
-    el.innerHTML = renderDashboardPanel(stats);
+    const aiOn = reportType === 'gsheet' && QA_CONFIG && QA_CONFIG.aiEnabled;
+    el.innerHTML = renderDashboardPanel(stats, reportId, aiOn);
+    if (reportType === 'gsheet') loadCustomMetrics(reportId);
   } catch (e) {
     el.innerHTML = '<div class="dashboard-empty">통계 추출에 실패했습니다.</div>';
   }
 }
 
-function renderDashboardPanel(stats) {
+function renderDashboardPanel(stats, reportId, aiOn) {
   // Pass Rate 게이지 색상
   const rateColor = stats.passRate >= 90 ? '#22c55e' : stats.passRate >= 70 ? '#f59e0b' : '#ef4444';
   const execColor = stats.executionRate >= 80 ? '#22c55e' : stats.executionRate >= 50 ? '#f59e0b' : '#6b7280';
@@ -737,10 +739,206 @@ function renderDashboardPanel(stats) {
           <div class="dash-count total"><span class="dash-count-value">${stats.total}</span><span class="dash-count-label">Total</span></div>
         </div>
       </div>
+      <div class="dash-section dash-custom-section hidden" id="custom-metrics-${reportId}"></div>
       ${sheetsHtml}
       ${failHtml}
+      ${aiOn ? renderAiSection(reportId) : ''}
     </div>
   `;
+}
+
+// ===== AI Q&A + 커스텀 지표 (report-ai-qa) =====
+
+// 리포트별 대화 상태 (브라우저 메모리 — 휘발성)
+const aiChat = {};
+
+const AI_PRESET_QUESTIONS = [
+  { label: '상태별 분포', q: '자동화상태(또는 상태) 컬럼의 값별 분포를 알려줘.' },
+  { label: 'Fail 원인 요약', q: 'Fail 항목들을 요약하고 공통 원인이 있는지 알려줘.' },
+  { label: '실행 안 된 항목', q: '실행되지 않은(N/T, 미수행) 항목은 몇 건이야?' },
+];
+
+function renderAiSection(reportId) {
+  const chips = AI_PRESET_QUESTIONS.map(p =>
+    `<button type="button" class="ai-chip" data-q="${escapeAttr(p.q)}" onclick="sendAiQuestion('${reportId}', this.dataset.q)">${escapeHtml(p.label)}</button>`
+  ).join('');
+  return `
+    <div class="dash-section ai-section">
+      <button type="button" class="ai-toggle" onclick="toggleAiPanel('${reportId}')">
+        🤖 AI 에게 질문 <span class="ai-caret" id="ai-caret-${reportId}">▾</span>
+      </button>
+      <div class="ai-panel hidden" id="ai-panel-${reportId}">
+        <div class="ai-chips">${chips}</div>
+        <div class="ai-messages" id="ai-messages-${reportId}"></div>
+        <div class="ai-input-row">
+          <input type="text" id="ai-input-${reportId}" class="ai-input" maxlength="1000"
+            placeholder="이 결과서에 대해 질문하세요... (예: IMPLEMENTED 중 Pass 비율은?)"
+            onkeydown="if(event.key==='Enter'){sendAiQuestion('${reportId}');}">
+          <button type="button" class="btn btn-primary btn-sm" id="ai-send-${reportId}" onclick="sendAiQuestion('${reportId}')">전송</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function toggleAiPanel(reportId) {
+  const panel = document.getElementById(`ai-panel-${reportId}`);
+  const caret = document.getElementById(`ai-caret-${reportId}`);
+  if (!panel) return;
+  panel.classList.toggle('hidden');
+  if (caret) caret.textContent = panel.classList.contains('hidden') ? '▾' : '▴';
+}
+
+function appendAiBubble(reportId, role, html) {
+  const box = document.getElementById(`ai-messages-${reportId}`);
+  if (!box) return null;
+  const div = document.createElement('div');
+  div.className = `ai-msg ${role}`;
+  div.innerHTML = `<div class="ai-text">${html}</div>`;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+  return div;
+}
+
+function renderAiText(bubble, text) {
+  const el = bubble && bubble.querySelector('.ai-text');
+  if (el) el.innerHTML = escapeHtml(text).replace(/\n/g, '<br>');
+}
+
+function parseSseChunk(chunk) {
+  let event = null, data = null;
+  for (const line of chunk.split('\n')) {
+    if (line.startsWith('event: ')) event = line.slice(7).trim();
+    else if (line.startsWith('data: ')) data = line.slice(6);
+  }
+  if (!event || data == null) return null;
+  try { return { event, data: JSON.parse(data) }; } catch (_) { return null; }
+}
+
+async function sendAiQuestion(reportId, preset) {
+  const st = aiChat[reportId] = aiChat[reportId] || { messages: [], defs: {}, seq: 0, busy: false };
+  if (st.busy) return;
+
+  const input = document.getElementById(`ai-input-${reportId}`);
+  const question = (preset || (input && input.value) || '').trim();
+  if (!question) return;
+  if (input && !preset) input.value = '';
+
+  st.messages.push({ role: 'user', content: question });
+  appendAiBubble(reportId, 'user', escapeHtml(question));
+  const bubble = appendAiBubble(reportId, 'assistant', '<span class="ai-typing">생각 중…</span>');
+
+  st.busy = true;
+  const sendBtn = document.getElementById(`ai-send-${reportId}`);
+  if (sendBtn) sendBtn.disabled = true;
+
+  let assistantText = '';
+  try {
+    const resp = await fetch(`/api/reports/${reportId}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: st.messages }),
+    });
+    if (!resp.ok) {
+      const d = await resp.json().catch(() => ({}));
+      throw new Error(d.error || `AI 응답 실패 (${resp.status})`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const ev = parseSseChunk(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+        if (!ev) continue;
+        if (ev.event === 'text') {
+          assistantText += ev.data.delta;
+          renderAiText(bubble, assistantText);
+        } else if (ev.event === 'metric') {
+          attachAiMetric(reportId, bubble, ev.data);
+        } else if (ev.event === 'error') {
+          throw new Error(ev.data.message || 'AI 오류');
+        }
+        const box = document.getElementById(`ai-messages-${reportId}`);
+        if (box) box.scrollTop = box.scrollHeight;
+      }
+    }
+    if (!assistantText) renderAiText(bubble, '(위 계산 결과를 확인해 주세요)');
+    st.messages.push({ role: 'assistant', content: assistantText || '(계산 결과 제공됨)' });
+  } catch (e) {
+    st.messages.pop(); // 실패한 질문은 이력에서 제거 (재시도 가능하게)
+    renderAiText(bubble, '');
+    bubble.insertAdjacentHTML('beforeend', `<div class="ai-error">⚠️ ${escapeHtml(e.message)}</div>`);
+  } finally {
+    st.busy = false;
+    if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
+function attachAiMetric(reportId, bubble, data) {
+  const st = aiChat[reportId];
+  if (!st || !bubble) return;
+  const token = 'm' + (++st.seq);
+  st.defs[token] = data.definition;
+  const badge = document.createElement('div');
+  badge.className = 'ai-metric';
+  badge.innerHTML = `
+    <span class="ai-metric-value">${escapeHtml(data.computed.display)}</span>
+    <span class="ai-metric-label">${escapeHtml(data.definition.label)}</span>
+    <button type="button" class="ai-pin" onclick="pinAiMetric('${reportId}', '${token}', this)">📌 대시보드에 추가</button>`;
+  bubble.appendChild(badge);
+}
+
+async function pinAiMetric(reportId, token, btn) {
+  const def = aiChat[reportId] && aiChat[reportId].defs[token];
+  if (!def) return;
+  btn.disabled = true;
+  const d = await api(`/api/reports/${reportId}/metrics`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(def),
+  });
+  if (!d || d.error) {
+    btn.disabled = false;
+    showToast('❌ ' + ((d && d.error) || '카드 추가 실패'), 'error');
+    return;
+  }
+  btn.textContent = '✅ 추가됨';
+  showToast('📌 대시보드에 추가되었습니다', 'success');
+  loadCustomMetrics(reportId);
+}
+
+async function loadCustomMetrics(reportId) {
+  const el = document.getElementById(`custom-metrics-${reportId}`);
+  if (!el) return;
+  try {
+    const d = await api(`/api/reports/${reportId}/metrics`);
+    const list = (d && d.metrics) || [];
+    if (!list.length) { el.innerHTML = ''; el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    el.innerHTML = `
+      <div class="dash-section-title">📌 커스텀 지표</div>
+      <div class="dash-custom-cards">
+        ${list.map(m => `
+          <div class="dash-custom-card${m.error ? ' error' : ''}">
+            <span class="dcc-value">${m.error ? '⚠️' : escapeHtml(m.display)}</span>
+            <span class="dcc-label">${escapeHtml(m.label)}${m.error ? ' — ' + escapeHtml(m.error) : ''}</span>
+            <button type="button" class="dcc-del" title="카드 삭제" data-label="${escapeAttr(m.label)}"
+              onclick="deleteCustomMetric('${reportId}', '${m.id}', this.dataset.label)">✕</button>
+          </div>`).join('')}
+      </div>`;
+  } catch (_) { /* 지표 로드 실패는 대시보드 자체를 막지 않음 */ }
+}
+
+async function deleteCustomMetric(reportId, metricId, label) {
+  if (!confirm(`'${label}' 카드를 삭제할까요?`)) return;
+  const d = await api(`/api/reports/${reportId}/metrics/${metricId}`, { method: 'DELETE' });
+  if (d && d.error) { showToast('❌ ' + d.error, 'error'); return; }
+  loadCustomMetrics(reportId);
 }
 
 // ===== Refresh Google Sheets =====

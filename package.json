@@ -1,13 +1,15 @@
 {
   "name": "test-report-portal",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "테스트 결과 리포트 관리 포털",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
     "adm-zip": "^0.5.10",
     "cheerio": "^1.0.0-rc.12",
     "dotenv": "^16.4.5",
