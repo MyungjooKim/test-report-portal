@@ -154,6 +154,15 @@ const upload = multer({
   limits: { fileSize: 200 * 1024 * 1024 }
 });
 
+// HTML 은 자산 URL(?v=__V__)에 앱 버전을 주입해 서빙 — 배포 시 URL 이 바뀌어
+// Cloudflare 엣지·브라우저 캐시(Browser Cache TTL 4h)를 확실히 무효화한다.
+const APP_PKG_VERSION = require('./package.json').version;
+function sendHtmlWithVersion(res, file) {
+  const html = fs.readFileSync(path.join(__dirname, 'public', file), 'utf-8')
+    .replace(/__V__/g, APP_PKG_VERSION);
+  res.type('html').send(html);
+}
+
 // 정적 파일 캐시 정책 — html/css/js 는 no-cache(항상 재검증, ETag 로 미변경 시 304).
 // 배포 후 브라우저가 구버전 app.js 를 계속 쓰거나, 시트 새로고침(동일 파일명 덮어쓰기) 후
 // 구버전 리포트 HTML 이 보이는 문제 방지.
@@ -174,7 +183,7 @@ app.use(express.json());
 // 로그인 페이지 — 통합 모드면 tcgen 로그인으로 위임
 app.get('/login', (req, res) => {
   if (INTEGRATED) return res.redirect(TCGEN_PUBLIC_URL + '/login');
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+  sendHtmlWithVersion(res, 'login.html');
 });
 
 // 로그아웃 — 포털 세션 파기 후 통합 모드면 tcgen 로그아웃까지 연쇄 (양쪽 세션 종료)
@@ -244,6 +253,9 @@ async function requireAuth(req, res, next) {
 }
 
 app.use(requireAuth);
+
+// 메인 페이지 — 자산 URL 에 버전 주입 (static 대신 이 라우트가 index.html 서빙)
+app.get('/', (req, res) => sendHtmlWithVersion(res, 'index.html'));
 
 // 인증된 사용자만 정적 파일 접근
 app.use(express.static(path.join(__dirname, 'public'), STATIC_OPTS));
