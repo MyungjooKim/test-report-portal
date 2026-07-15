@@ -44,11 +44,11 @@ const INTEGRATED = process.env.INTEGRATED === '1';
 const TCGEN_URL = (process.env.TCGEN_URL || 'http://localhost:5001').replace(/\/$/, '');
 const TCGEN_PUBLIC_URL = (process.env.TCGEN_PUBLIC_URL || TCGEN_URL).replace(/\/$/, '');
 
-// tcgen /whoami 로 세션 검증 — 브라우저 쿠키를 서버 대 서버로 포워딩
-function verifyTcgenSession(cookieHeader) {
+// tcgen API 를 서버 대 서버로 호출 (브라우저 쿠키 포워딩) — 200 + JSON 이면 파싱 결과, 아니면 null
+function tcgenGetJson(apiPath, cookieHeader) {
   return new Promise((resolve) => {
     let url;
-    try { url = new URL(TCGEN_URL + '/whoami'); } catch { return resolve(null); }
+    try { url = new URL(TCGEN_URL + apiPath); } catch { return resolve(null); }
     const lib = url.protocol === 'https:' ? require('https') : require('http');
     const req = lib.request({
       method: 'GET',
@@ -62,16 +62,48 @@ function verifyTcgenSession(cookieHeader) {
       r.on('data', (c) => { body += c; });
       r.on('end', () => {
         if (r.statusCode !== 200) return resolve(null);
-        try {
-          const j = JSON.parse(body);
-          resolve(j && j.authenticated && j.email ? j : null);
-        } catch { resolve(null); }
+        try { resolve(JSON.parse(body)); } catch { resolve(null); }
       });
     });
     req.on('error', () => resolve(null));
     req.on('timeout', () => { req.destroy(); resolve(null); });
     req.end();
   });
+}
+
+// tcgen /whoami 로 세션 검증
+function verifyTcgenSession(cookieHeader) {
+  return tcgenGetJson('/whoami', cookieHeader)
+    .then((j) => (j && j.authenticated && j.email ? j : null));
+}
+
+// tcgen 에서 로그인 사용자의 Google access token 수신 — Sheets 연동용 (INTEGRATION_SPEC §5.3)
+function fetchTcgenAccessToken(cookieHeader) {
+  return tcgenGetJson('/whoami/token', cookieHeader)
+    .then((j) => (j && j.ok && j.access_token ? j : null));
+}
+
+// Sheets API 용 OAuth 클라이언트 — 자체 로그인 토큰 우선, 통합 모드면 tcgen 토큰 사용
+async function getGoogleAuthForRequest(req) {
+  if (req.session.googleTokens) {
+    const c = createOAuth2Client();
+    c.setCredentials(req.session.googleTokens);
+    c.on('tokens', (tokens) => {
+      if (tokens.refresh_token) req.session.googleTokens.refresh_token = tokens.refresh_token;
+      req.session.googleTokens.access_token = tokens.access_token;
+    });
+    return c;
+  }
+  if (INTEGRATED) {
+    // 단기 access token 만 사용 — 갱신은 tcgen 이 담당하므로 요청마다 새로 받는다
+    const tok = await fetchTcgenAccessToken(req.headers.cookie);
+    if (tok) {
+      const c = new google.auth.OAuth2();
+      c.setCredentials({ access_token: tok.access_token });
+      return c;
+    }
+  }
+  return null;
 }
 
 // 디렉토리 설정
@@ -837,8 +869,13 @@ function isSkip(text) {
 
 // Google Sheets 리포트 새로고침 (최신 데이터로 갱신)
 app.post('/api/reports/:id/refresh', async (req, res) => {
-  if (!req.session.googleTokens) {
-    return res.status(401).json({ error: 'Google 로그인이 필요합니다.' });
+  const oauth2Client = await getGoogleAuthForRequest(req);
+  if (!oauth2Client) {
+    return res.status(401).json({
+      error: INTEGRATED
+        ? 'Google 토큰을 가져오지 못했습니다. TC Generator 에서 로그아웃 후 다시 로그인해 주세요.'
+        : 'Google 로그인이 필요합니다.',
+    });
   }
 
   const db = loadDB();
@@ -858,14 +895,6 @@ app.post('/api/reports/:id/refresh', async (req, res) => {
   }
 
   try {
-    const oauth2Client = createOAuth2Client();
-    oauth2Client.setCredentials(req.session.googleTokens);
-
-    oauth2Client.on('tokens', (tokens) => {
-      if (tokens.refresh_token) req.session.googleTokens.refresh_token = tokens.refresh_token;
-      req.session.googleTokens.access_token = tokens.access_token;
-    });
-
     const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
 
     const meta = await sheets.spreadsheets.get({ spreadsheetId });
@@ -1042,12 +1071,16 @@ app.get('/auth/google/callback', async (req, res) => {
 });
 
 // Google 연결 상태 확인
-app.get('/api/google/status', (req, res) => {
+app.get('/api/google/status', async (req, res) => {
   if (req.session.googleTokens && req.session.googleUser) {
-    res.json({ connected: true, user: req.session.googleUser });
-  } else {
-    res.json({ connected: false });
+    return res.json({ connected: true, user: req.session.googleUser });
   }
+  // 통합 모드: tcgen 토큰이 조회되면 연결된 것으로 취급 (별도 연결 절차 불필요)
+  if (INTEGRATED && req.session.googleUser) {
+    const tok = await fetchTcgenAccessToken(req.headers.cookie);
+    if (tok) return res.json({ connected: true, user: req.session.googleUser, integrated: true });
+  }
+  res.json({ connected: false });
 });
 
 // Google 로그아웃
@@ -1059,8 +1092,13 @@ app.post('/api/google/disconnect', (req, res) => {
 
 // Google Spreadsheet 데이터 가져오기
 app.post('/api/google/sheets/import', async (req, res) => {
-  if (!req.session.googleTokens) {
-    return res.status(401).json({ error: 'Google 로그인이 필요합니다.' });
+  const oauth2Client = await getGoogleAuthForRequest(req);
+  if (!oauth2Client) {
+    return res.status(401).json({
+      error: INTEGRATED
+        ? 'Google 토큰을 가져오지 못했습니다. TC Generator 에서 로그아웃 후 다시 로그인해 주세요.'
+        : 'Google 로그인이 필요합니다.',
+    });
   }
 
   const { url, projectId, date, uploadedBy } = req.body;
@@ -1081,17 +1119,6 @@ app.post('/api/google/sheets/import', async (req, res) => {
   }
 
   try {
-    const oauth2Client = createOAuth2Client();
-    oauth2Client.setCredentials(req.session.googleTokens);
-
-    // 토큰 갱신 처리
-    oauth2Client.on('tokens', (tokens) => {
-      if (tokens.refresh_token) {
-        req.session.googleTokens.refresh_token = tokens.refresh_token;
-      }
-      req.session.googleTokens.access_token = tokens.access_token;
-    });
-
     const sheets = google.sheets({ version: 'v4', auth: oauth2Client });
 
     // 스프레드시트 메타데이터
