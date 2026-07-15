@@ -474,19 +474,19 @@ function renderDateGroups(grouped) {
             const typeBadge = r.type === 'folder' ? '<span class="type-badge">ZIP</span>' 
               : r.type === 'markdown' ? '<span class="type-badge md">MD</span>'
               : r.type === 'gsheet' ? '<span class="type-badge gsheet">Sheets</span>' : '';
-            const dashBtn = (r.type === 'gsheet' || r.type === 'single' || r.type === 'markdown' || r.type === 'folder')
-              ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); toggleDashboard('${r.id}', '${r.type}')" title="대시보드">📊</button>` : '';
-            const refreshBtn = r.type === 'gsheet' 
+            // 행(제목) 클릭 = 대시보드 토글, 결과서 열람은 전용 버튼(📄)으로
+            const viewBtn = `<button class="btn-icon-sm" onclick="event.stopPropagation(); viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')" title="결과서 보기">📄</button>`;
+            const refreshBtn = r.type === 'gsheet'
               ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); refreshReport('${r.id}')" title="최신 데이터로 새로고침">🔄</button>` : '';
             return `
-            <div class="report-item" onclick="viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')">
+            <div class="report-item" onclick="toggleDashboard('${r.id}', '${r.type}')" title="클릭하면 대시보드가 펼쳐집니다">
               <span class="ri-icon">${typeIcon}</span>
               <div class="ri-info">
                 <div class="ri-name">${escapeHtml(r.originalName)} ${typeBadge}</div>
                 <div class="ri-meta">${r.uploadedBy} · ${formatTime(r.uploadedAt)}${r.lastRefreshedAt ? ' · 🔄 ' + formatTime(r.lastRefreshedAt) : ''}</div>
               </div>
               <div class="ri-actions">
-                ${dashBtn}
+                ${viewBtn}
                 ${refreshBtn}
                 <button class="btn-icon-sm" onclick="event.stopPropagation(); openReportDirect('${escapeAttr(r.indexPath)}')" title="새 탭에서 열기">↗</button>
                 <button class="btn-icon-sm danger" onclick="event.stopPropagation(); deleteReport('${r.id}')" title="삭제">🗑</button>
