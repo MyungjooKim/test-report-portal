@@ -1568,9 +1568,12 @@ function generateSheetHtml(title, allData, sourceUrl) {
     .sheet-content.active { display: block; }
     table { border-collapse: collapse; width: 100%; font-size: 13px; table-layout: fixed; }
     th, td { border: 1px solid #e4e7ec; padding: 6px 10px; text-align: left; word-wrap: break-word; overflow-wrap: break-word; white-space: normal; vertical-align: top; }
-    th { background: #f8f9fb; font-weight: 600; position: sticky; top: 0; }
+    /* sticky 헤더: 래퍼가 세로 스크롤 컨테이너여야 동작 (overflow-x 만으로는 무력화됨).
+       border-collapse 에서는 sticky th 테두리가 스크롤 시 사라지므로 box-shadow 로 대체 */
+    th { background: #f8f9fb; font-weight: 600; position: sticky; top: 0; z-index: 1;
+         box-shadow: inset 0 1px 0 #e4e7ec, inset 0 -1px 0 #e4e7ec; }
     tr:hover { background: #f8fafc; }
-    .table-wrapper { overflow-x: auto; }
+    .table-wrapper { overflow: auto; max-height: calc(100vh - 160px); }
     .cell-pass { background: #dcfce7; color: #166534; font-weight: 600; }
     .cell-fail { background: #fee2e2; color: #991b1b; font-weight: 600; }
     .cell-skip { background: #fef9c3; color: #854d0e; }

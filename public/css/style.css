@@ -1453,3 +1453,39 @@ mark {
   padding: 8px 12px; font-size: 13px; outline: none;
 }
 .ai-input:focus { border-color: #93b4f8; }
+
+/* ===== 뷰어 네비게이션 — 상하 이동 + 진행률 + 그룹 점프 ===== */
+#reportViewer { position: relative; }
+.viewer-nav {
+  position: absolute; right: 28px; bottom: 28px; z-index: 50;
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(255, 255, 255, 0.92); border: 1px solid var(--border);
+  border-radius: 999px; padding: 4px 6px 4px 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+.viewer-progress { font-size: 11px; font-weight: 600; color: #64748b; min-width: 30px; text-align: right; }
+.viewer-progress:empty { display: none; }
+.vn-btn {
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 1px solid var(--border); background: #fff; cursor: pointer;
+  font-size: 14px; color: #334155; line-height: 1;
+}
+.vn-btn:hover { background: #eef4ff; border-color: #93b4f8; color: #1d4ed8; }
+
+.viewer-jump {
+  margin-bottom: 12px; padding: 10px 12px;
+  background: #f8fafc; border: 1px solid var(--border); border-radius: 8px;
+  max-height: 220px; overflow-y: auto;
+}
+.viewer-jump.hidden { display: none; }
+.vj-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.vj-label { font-size: 12px; color: #64748b; flex-shrink: 0; }
+.vj-select { border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px; }
+.vj-groups { display: flex; flex-wrap: wrap; gap: 6px; }
+.vj-group {
+  border: 1px solid #d6e3ff; background: #fff; color: #1d4ed8;
+  border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; text-align: left;
+}
+.vj-group:hover { background: #e7efff; }
+.vj-count { color: #94a3b8; font-size: 11px; margin-left: 4px; }
+.vj-empty { font-size: 12px; color: #94a3b8; }
