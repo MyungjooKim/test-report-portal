@@ -7,6 +7,7 @@ let selectedFiles = [];
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
   setupUploadZone();
+  initSidebarResize();
 
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
 
@@ -20,6 +21,47 @@ document.addEventListener('DOMContentLoaded', () => {
   loadUserInfo();
   loadProjects().then(() => handleNavigation());
 });
+
+// ===== Sidebar Resize =====
+const SIDEBAR_DEFAULT_WIDTH = 340;
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 560;
+
+function initSidebarResize() {
+  const sidebar = document.getElementById('sidebar');
+  const resizer = document.getElementById('sidebarResizer');
+  if (!sidebar || !resizer) return;
+
+  const saved = parseInt(localStorage.getItem('sidebarWidth'), 10);
+  if (saved >= SIDEBAR_MIN_WIDTH && saved <= SIDEBAR_MAX_WIDTH) {
+    sidebar.style.width = saved + 'px';
+  }
+
+  resizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebar.getBoundingClientRect().width;
+    document.body.classList.add('sidebar-resizing');
+
+    const onMove = (ev) => {
+      const w = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, startWidth + ev.clientX - startX));
+      sidebar.style.width = w + 'px';
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('sidebar-resizing');
+      localStorage.setItem('sidebarWidth', Math.round(sidebar.getBoundingClientRect().width));
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  resizer.addEventListener('dblclick', () => {
+    sidebar.style.width = SIDEBAR_DEFAULT_WIDTH + 'px';
+    localStorage.setItem('sidebarWidth', SIDEBAR_DEFAULT_WIDTH);
+  });
+}
 
 async function loadUserInfo() {
   const user = await api('/api/me');
