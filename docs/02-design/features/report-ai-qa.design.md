@@ -82,7 +82,8 @@ gsheet import/refresh
 ```
 
 - 첫 행 = header 로 간주 (generateSheetHtml 과 동일 가정)
-- **상한**: 시트 합계 5,000 행 또는 파일 1MB 초과 시 저장하되 chat 컨텍스트에는 행 수 제한 적용(§6.2)
+- **상한**: 저장은 무제한 (evaluator 가 카드 정확성을 위해 전체 데이터 필요) — 상한은 LLM 컨텍스트에만 적용(§5.4). *(구현 확정, 2026-07-15 갭 분석 G-1 반영)*
+- reportId 는 `path.basename` 으로 경로 조작 방어 (구현 추가 사항)
 - gsheet 타입 외 리포트는 sheetData 없음 → AI 패널 비노출
 
 ### 3.2 커스텀 metric 정의 — `report.customMetrics[]` (db.json)
@@ -101,7 +102,7 @@ gsheet import/refresh
 ```
 
 **연산 정의**
-- `count`: filter 를 모두 만족하는 행 수. 표시: `N건 (전체 M건 중, P%)`
+- `count`: filter 를 모두 만족하는 행 수. 표시: `N건 / 전체 M건 (P%)` *(구현 문구 기준, G-2 반영)*
 - `ratio`: 분모 = filter 만족 행, 분자 = filter ∧ of 만족 행. 표시: `P% (분자/분모)`
 - 조건 `op`: `eq`(대소문자 무시 완전일치) | `in`(값 배열) | `contains`(부분일치) | `not_empty`
 - filter 가 빈 배열이면 전체 행이 분모 (예: "IMPLEMENTED 비율" = filter:[] + agg:ratio + of:[자동화상태=IMPLEMENTED])
@@ -126,7 +127,7 @@ event: done     data: {}
 event: error    data: {"message": "..."}
 ```
 - `metric` 이벤트가 있으면 프런트는 해당 답변 말미에 "📌 대시보드에 추가" 버튼 렌더 (definition 을 버튼에 보관)
-- 실패 조건: sheetData 없음(400), LLM 오류(502), 인증(기존 requireAuth 401)
+- 실패 조건: sheetData 없음(400), 인증(기존 requireAuth 401). LLM 오류는 스트림 개시 후에는 HTTP 상태를 바꿀 수 없으므로 **SSE `error` 이벤트**로 전달 *(G-3 반영)*
 
 ### 4.2 metrics CRUD
 

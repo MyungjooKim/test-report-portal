@@ -10,6 +10,10 @@ document.addEventListener('DOMContentLoaded', () => {
   initSidebarResize();
   initQaLauncher();
 
+  // 뷰어 네비게이션 — iframe 로드 시마다 진행률 리스너 재부착
+  const viewerFrameEl = document.getElementById('viewerFrame');
+  if (viewerFrameEl) viewerFrameEl.addEventListener('load', initViewerNav);
+
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
 
   const savedName = localStorage.getItem('uploaderName');
@@ -525,6 +529,7 @@ async function loadAndShowReport(projectId, reportId) {
 
 function goBackToProject() {
   document.getElementById('viewerFrame').src = '';
+  hideViewerJump();
   if (currentProjectId) {
     navigateTo(`#project/${currentProjectId}`);
   } else {
@@ -534,6 +539,152 @@ function goBackToProject() {
 
 function openReportNewTab() {
   if (currentReportUrl) window.open(currentReportUrl, '_blank');
+}
+
+// ===== Viewer Navigation (상하 이동 + 진행률 + 그룹 점프) =====
+
+function viewerDoc() {
+  const frame = document.getElementById('viewerFrame');
+  try { return frame && frame.src ? frame.contentDocument : null; } catch (_) { return null; }
+}
+
+// 실제 세로 스크롤이 일어나는 대상 탐색 — 신형 gsheet HTML 은 .table-wrapper 가 스크롤 컨테이너,
+// 구형/md/일반 HTML 은 문서 자체가 스크롤
+function viewerScrollTarget(doc) {
+  const active = doc.querySelector('.sheet-content.active .table-wrapper') || doc.querySelector('.table-wrapper');
+  if (active && active.scrollHeight - active.clientHeight > 30) return active;
+  return doc.scrollingElement || doc.documentElement;
+}
+
+function viewerScrollTo(where) {
+  const doc = viewerDoc();
+  if (!doc) return;
+  const t = viewerScrollTarget(doc);
+  t.scrollTo({ top: where === 'top' ? 0 : t.scrollHeight, behavior: 'smooth' });
+}
+
+function updateViewerProgress() {
+  const el = document.getElementById('viewerProgress');
+  if (!el) return;
+  const doc = viewerDoc();
+  if (!doc) { el.textContent = ''; return; }
+  const t = viewerScrollTarget(doc);
+  const max = t.scrollHeight - t.clientHeight;
+  el.textContent = max > 30 ? Math.min(100, Math.round((t.scrollTop / max) * 100)) + '%' : '';
+}
+
+function initViewerNav() {
+  const doc = viewerDoc();
+  hideViewerJump();
+  updateViewerProgress();
+  if (!doc) return;
+  // scroll 은 버블링하지 않으므로 capture 로 문서·내부 컨테이너 스크롤 모두 감지
+  doc.addEventListener('scroll', updateViewerProgress, true);
+}
+
+// ── 그룹 점프: 표의 분류 컬럼 값이 바뀌는 행으로 이동 (표 없으면 헤딩 목차) ──
+let _viewerJumpRows = [];
+
+function hideViewerJump() {
+  const panel = document.getElementById('viewerJumpPanel');
+  if (panel) { panel.classList.add('hidden'); panel.innerHTML = ''; }
+}
+
+function toggleViewerJump() {
+  const panel = document.getElementById('viewerJumpPanel');
+  if (!panel) return;
+  if (!panel.classList.contains('hidden')) { hideViewerJump(); return; }
+  buildViewerJumpPanel();
+  panel.classList.remove('hidden');
+}
+
+function viewerActiveTable(doc) {
+  return doc.querySelector('.sheet-content.active table') || doc.querySelector('table');
+}
+
+function buildViewerJumpPanel() {
+  const panel = document.getElementById('viewerJumpPanel');
+  const doc = viewerDoc();
+  if (!doc) { panel.innerHTML = '<div class="vj-empty">리포트가 로드되지 않았습니다.</div>'; return; }
+
+  const table = viewerActiveTable(doc);
+  if (table && table.querySelectorAll('tbody tr').length > 3) {
+    const headers = Array.from(table.querySelectorAll('thead th')).map(th => th.textContent.trim());
+    // 기본 그룹 컬럼: '분류' 포함 헤더 우선, 없으면 두 번째 컬럼
+    let defaultIdx = headers.findIndex(h => h.includes('분류') || h.toLowerCase() === 'category');
+    if (defaultIdx < 0) defaultIdx = Math.min(1, headers.length - 1);
+    panel.innerHTML = `
+      <div class="vj-row">
+        <label class="vj-label">그룹 기준</label>
+        <select class="vj-select" id="vjColSelect" onchange="renderViewerJumpGroups(this.value)">
+          ${headers.map((h, i) => `<option value="${i}" ${i === defaultIdx ? 'selected' : ''}>${escapeHtml(h || '(컬럼 ' + (i + 1) + ')')}</option>`).join('')}
+        </select>
+      </div>
+      <div class="vj-groups" id="vjGroups"></div>`;
+    renderViewerJumpGroups(defaultIdx);
+    return;
+  }
+
+  // 표가 없으면 헤딩 목차 (md/일반 HTML 리포트)
+  const heads = Array.from(doc.querySelectorAll('h1, h2, h3')).filter(h => h.textContent.trim());
+  if (heads.length) {
+    _viewerJumpRows = heads;
+    panel.innerHTML = `<div class="vj-groups">${heads.map((h, i) =>
+      `<button type="button" class="vj-group" style="padding-left:${(parseInt(h.tagName[1], 10) - 1) * 14 + 10}px"
+        onclick="viewerJumpTo(${i})">${escapeHtml(h.textContent.trim().slice(0, 60))}</button>`
+    ).join('')}</div>`;
+    return;
+  }
+  panel.innerHTML = '<div class="vj-empty">이동할 그룹/목차를 찾지 못했습니다.</div>';
+}
+
+function renderViewerJumpGroups(colIdx) {
+  const doc = viewerDoc();
+  const box = document.getElementById('vjGroups');
+  if (!doc || !box) return;
+  const table = viewerActiveTable(doc);
+  const rows = Array.from(table.querySelectorAll('tbody tr'));
+  const idx = parseInt(colIdx, 10);
+
+  // 값이 바뀌는 행 수집 (빈 셀은 이전 그룹 지속 — 시트 병합 셀 대응)
+  const groups = [];
+  let current = null;
+  rows.forEach((tr) => {
+    const cell = tr.cells[idx];
+    const v = cell ? cell.textContent.trim() : '';
+    if (v && v !== (current && current.label)) {
+      current = { label: v, row: tr, count: 0 };
+      groups.push(current);
+    }
+    if (current) current.count++;
+  });
+
+  if (groups.length < 2 || groups.length > 200) {
+    box.innerHTML = `<div class="vj-empty">이 컬럼은 그룹 구분에 적합하지 않습니다 (${groups.length}개 그룹). 다른 컬럼을 선택해 보세요.</div>`;
+    _viewerJumpRows = [];
+    return;
+  }
+  _viewerJumpRows = groups.map(g => g.row);
+  box.innerHTML = groups.map((g, i) =>
+    `<button type="button" class="vj-group" onclick="viewerJumpTo(${i})">${escapeHtml(g.label.slice(0, 40))} <span class="vj-count">${g.count}</span></button>`
+  ).join('');
+}
+
+function viewerJumpTo(i) {
+  const el = _viewerJumpRows[i];
+  const doc = viewerDoc();
+  if (!el || !doc) return;
+  el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  // sticky 헤더에 가려지지 않게 살짝 위로 보정
+  setTimeout(() => {
+    const t = viewerScrollTarget(doc);
+    t.scrollBy(0, -44);
+  }, 350);
+  // 도착 지점 하이라이트
+  const orig = el.style.backgroundColor;
+  el.style.transition = 'background-color 0.4s';
+  el.style.backgroundColor = '#fff3bf';
+  setTimeout(() => { el.style.backgroundColor = orig; }, 1600);
 }
 
 function openReportDirect(indexPath) {

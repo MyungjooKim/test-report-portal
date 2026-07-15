@@ -32,7 +32,7 @@
     </nav>
     <div class="sidebar-footer">
       <div class="user-info" id="userInfo"></div>
-      <span class="version-label">v0.4.0</span>
+      <span class="version-label">v0.4.1</span>
     </div>
     <div class="sidebar-resizer" id="sidebarResizer" title="드래그로 폭 조절 · 더블클릭으로 초기화"></div>
   </aside>
@@ -91,9 +91,16 @@
       <div class="viewer-bar">
         <button class="btn btn-back" onclick="goBackToProject()">← 돌아가기</button>
         <span class="viewer-title" id="viewerTitle">리포트</span>
+        <button class="btn btn-sm" id="viewerJumpBtn" onclick="toggleViewerJump()">🧭 그룹 이동 ▾</button>
         <button class="btn btn-sm" onclick="openReportNewTab()">새 탭에서 열기 ↗</button>
       </div>
+      <div class="viewer-jump hidden" id="viewerJumpPanel"></div>
       <iframe id="viewerFrame" class="viewer-frame"></iframe>
+      <div class="viewer-nav" id="viewerNav">
+        <span class="viewer-progress" id="viewerProgress"></span>
+        <button type="button" class="vn-btn" onclick="viewerScrollTo('top')" title="맨 위로">↑</button>
+        <button type="button" class="vn-btn" onclick="viewerScrollTo('bottom')" title="맨 아래로">↓</button>
+      </div>
     </main>
   </div>
 
