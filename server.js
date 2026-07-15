@@ -36,6 +36,41 @@ function createOAuth2Client() {
   return new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI);
 }
 
+// ──────────── QA 통합 (INTEGRATION_SPEC §5.2) ────────────
+// INTEGRATED=1 일 때만 동작 — 미설정 시 기존 자체 로그인 그대로 (배포 회귀 방지)
+const INTEGRATED = process.env.INTEGRATED === '1';
+const TCGEN_URL = (process.env.TCGEN_URL || 'http://localhost:5001').replace(/\/$/, '');
+
+// tcgen /whoami 로 세션 검증 — 브라우저 쿠키를 서버 대 서버로 포워딩
+function verifyTcgenSession(cookieHeader) {
+  return new Promise((resolve) => {
+    let url;
+    try { url = new URL(TCGEN_URL + '/whoami'); } catch { return resolve(null); }
+    const lib = url.protocol === 'https:' ? require('https') : require('http');
+    const req = lib.request({
+      method: 'GET',
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname,
+      headers: { 'Accept': 'application/json', 'Cookie': cookieHeader || '' },
+      timeout: 4000,
+    }, (r) => {
+      let body = '';
+      r.on('data', (c) => { body += c; });
+      r.on('end', () => {
+        if (r.statusCode !== 200) return resolve(null);
+        try {
+          const j = JSON.parse(body);
+          resolve(j && j.authenticated && j.email ? j : null);
+        } catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
 // 디렉토리 설정
 const REPORTS_DIR = path.join(__dirname, 'uploads');
 const DATA_FILE = path.join(__dirname, 'data', 'db.json');
@@ -87,20 +122,41 @@ app.use(express.json());
 
 // ──────────── 인증 미들웨어 ────────────
 
-// 로그인 페이지는 인증 없이 접근 가능
+// 로그인 페이지 — 통합 모드면 tcgen 로그인으로 위임
 app.get('/login', (req, res) => {
+  if (INTEGRATED) return res.redirect(TCGEN_URL + '/login');
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
-// 인증이 필요하지 않은 경로들
-const PUBLIC_PATHS = ['/auth/google', '/auth/google/callback', '/login', '/css/', '/js/'];
+// 인증이 필요하지 않은 경로들 — 통합 모드에서는 자체 OAuth 경로를 공개하지 않음
+const PUBLIC_PATHS = INTEGRATED
+  ? ['/login', '/css/', '/js/']
+  : ['/auth/google', '/auth/google/callback', '/login', '/css/', '/js/'];
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   // 공개 경로는 통과
   if (PUBLIC_PATHS.some(p => req.path.startsWith(p))) return next();
 
-  // 로그인 확인
+  // 로그인 확인 (통합 모드에서도 최초 1회 검증 후 세션에 캐시)
   if (req.session.googleUser) return next();
+
+  // 통합 모드: tcgen 세션을 신뢰 (포트 무관 쿠키 공유 / 서브도메인 쿠키)
+  if (INTEGRATED) {
+    const who = await verifyTcgenSession(req.headers.cookie);
+    if (who) {
+      req.session.googleUser = {
+        email: who.email,
+        name: who.name || who.email,
+        picture: who.picture || '',
+        integrated: true,
+      };
+      return next();
+    }
+    if (req.path.startsWith('/api/')) {
+      return res.status(401).json({ error: '로그인이 필요합니다.', need_login: true });
+    }
+    return res.redirect(TCGEN_URL + '/login');
+  }
 
   // API 요청이면 401
   if (req.path.startsWith('/api/')) {
@@ -119,6 +175,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 // 현재 사용자 정보 API
 app.get('/api/me', (req, res) => {
   res.json(req.session.googleUser || null);
+});
+
+// QA 통합 설정 — 프런트 9-dot 런처가 사용
+app.get('/api/config', (req, res) => {
+  res.json({ integrated: INTEGRATED, tcgenUrl: TCGEN_URL });
 });
 
 // ──────────── 헬퍼 ────────────

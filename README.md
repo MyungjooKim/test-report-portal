@@ -46,7 +46,19 @@ docker run -d --name tr-portal -p 3000:3000 \
 GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=xxx
 GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
+
+# QA 통합 모드 (선택) — 설정 시 자체 로그인 대신 TC Generator 세션을 신뢰 (SSO)
+# 미설정 시 기존 자체 Google 로그인 그대로 동작
+INTEGRATED=1
+TCGEN_URL=http://localhost:5001   # 운영: https://tc.rgrg.im
 ```
+
+### QA 통합 모드 (INTEGRATED=1)
+
+- 로그인은 TC Generator 로 위임 (`/login` → tcgen `/login`), 자체 `/auth/google` 은 비공개
+- 세션 검증: 브라우저 쿠키를 tcgen `/whoami` 로 서버 대 서버 포워딩, 최초 1회 검증 후 세션 캐시
+- 우상단 9-dot 런처로 TC Generator ↔ TR Portal 전환 (`/api/config` 로 통합 여부 전달)
+- 로그아웃 시 tcgen `/logout` 까지 이동해 양쪽 세션 모두 종료
 
 ## 브랜치 전략
 

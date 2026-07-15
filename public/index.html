@@ -37,6 +37,11 @@
     <div class="sidebar-resizer" id="sidebarResizer" title="드래그로 폭 조절 · 더블클릭으로 초기화"></div>
   </aside>
 
+  <!-- QA 통합 — 9-dot 앱 런처 (INTEGRATED 모드에서만 표시, INTEGRATION_SPEC §6) -->
+  <button type="button" id="launcherBtn" onclick="toggleLauncher(event)" aria-label="앱 런처" title="QA 도구 전환">
+    <span class="lgrid"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+  </button>
+
   <!-- 메인 영역 -->
   <div class="main-wrapper">
     <!-- 검색 결과 -->
