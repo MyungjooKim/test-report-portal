@@ -12,6 +12,7 @@ const { google } = require('googleapis');
 const sheetStore = require('./lib/sheet-store');
 const { evaluateMetric } = require('./lib/metric-eval');
 const { computeStatsFromSheetData, collectFailItems } = require('./lib/report-stats');
+const { computeDetailStats } = require('./lib/detail-stats');
 
 require('dotenv').config();
 
@@ -112,6 +113,16 @@ async function getGoogleAuthForRequest(req) {
 // 디렉토리 설정
 const REPORTS_DIR = path.join(__dirname, 'uploads');
 const DATA_FILE = path.join(__dirname, 'data', 'db.json');
+const SETTINGS_FILE = path.join(__dirname, 'data', 'settings.json');
+
+// 운영 조정 가능한 설정 — 볼륨(data/)에 있어 재배포 없이 수정 가능. 없으면 코드 기본값 사용.
+function loadSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+  } catch (_) {
+    return {};
+  }
+}
 
 if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
 if (!fs.existsSync(path.dirname(DATA_FILE))) fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
@@ -559,6 +570,7 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
 
   const date = req.body.date || new Date().toISOString().slice(0, 10);
   const uploadedBy = req.body.uploadedBy || '익명';
+  const automation = req.body.automation === '1';
   const newReports = [];
 
   for (const file of req.files) {
@@ -583,6 +595,7 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
         date,
         uploadedBy,
         uploadedAt: new Date().toISOString(),
+        automation,
         memo: '',
         searchIndex
       };
@@ -603,6 +616,7 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
         date,
         uploadedBy,
         uploadedAt: new Date().toISOString(),
+        automation,
         memo: '',
         searchIndex
       };
@@ -622,6 +636,7 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
         date,
         uploadedBy,
         uploadedAt: new Date().toISOString(),
+        automation,
         memo: '',
         searchIndex
       };
@@ -775,6 +790,20 @@ function getProjectAndChildrenIds(db, projectId) {
 }
 
 // 리포트 통계 대시보드 API
+// 상세 대시보드 통계 — 특징 축(거래소/기기/테스터 등) 자동 감지 + 축별 결과 분포 (gsheet 전용)
+app.get('/api/reports/:id/stats/detail', (req, res) => {
+  const db = loadDB();
+  const report = db.reports.find(r => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
+  if (report.type !== 'gsheet') return res.status(400).json({ error: '상세 대시보드는 Sheets 리포트만 지원합니다.' });
+
+  const sheetData = sheetStore.load(report.id);
+  if (!sheetData || !sheetData.sheets || !sheetData.sheets.length) {
+    return res.status(400).json({ error: '시트 데이터가 없습니다. 리포트를 새로고침해 주세요.' });
+  }
+  res.json(computeDetailStats(sheetData, loadSettings().detail));
+});
+
 app.get('/api/reports/:id/stats', (req, res) => {
   const db = loadDB();
   const report = db.reports.find(r => r.id === req.params.id);
@@ -786,7 +815,10 @@ app.get('/api/reports/:id/stats', (req, res) => {
     const sheetData = sheetStore.load(report.id);
     if (sheetData && sheetData.sheets && sheetData.sheets.length) {
       try {
-        return res.json(computeStatsFromSheetData(sheetData));
+        const stats = computeStatsFromSheetData(sheetData);
+        // 상세 대시보드 가용성 — 기준(축 수·건수)은 data/settings.json 의 detail 로 조정 가능
+        const detail = computeDetailStats(sheetData, loadSettings().detail);
+        return res.json({ ...stats, detailAvailable: detail.available, detailAxes: detail.axes.length });
       } catch (e) {
         console.error('rows 기반 통계 실패, HTML 파서로 fallback:', e.message);
       }
@@ -1652,7 +1684,7 @@ app.post('/api/google/sheets/import', async (req, res) => {
     });
   }
 
-  const { url, projectId, date, uploadedBy } = req.body;
+  const { url, projectId, date, uploadedBy, automation } = req.body;
   if (!url || !projectId) {
     return res.status(400).json({ error: 'URL과 프로젝트ID가 필요합니다.' });
   }
@@ -1719,6 +1751,7 @@ app.post('/api/google/sheets/import', async (req, res) => {
       date: date || new Date().toISOString().slice(0, 10),
       uploadedBy: uploadedBy || req.session.googleUser.name || '익명',
       uploadedAt: new Date().toISOString(),
+      automation: automation === true || automation === '1',
       memo: '',
       searchIndex
     };

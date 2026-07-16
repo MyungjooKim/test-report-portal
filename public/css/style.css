@@ -996,6 +996,16 @@ mark {
   color: #92400e;
 }
 
+.type-badge.automation {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.upload-automation {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; margin-top: 4px; cursor: pointer; user-select: none;
+}
+
 /* ===== 다이어그램 업로드 탭 ===== */
 .diagram-textarea {
   font-family: 'SF Mono', Menlo, Consolas, monospace;
@@ -1250,6 +1260,28 @@ mark {
   font-weight: 600;
   margin-bottom: 10px;
 }
+
+/* ===== 상세 대시보드 (특징 축별 분포) ===== */
+.dash-detail { margin-top: 12px; }
+.detail-legend { display: flex; gap: 14px; margin-bottom: 12px; }
+.legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-secondary); }
+.legend-dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.detail-group { margin-bottom: 16px; }
+.detail-row { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+.detail-row-label {
+  width: 150px; flex-shrink: 0; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right;
+}
+.detail-stack {
+  flex: 1; display: flex; height: 14px; border-radius: 4px; overflow: hidden;
+  background: #f1f5f9;
+}
+.stack-seg { height: 100%; }
+.seg-pass { background: #22c55e; }
+.seg-fail { background: #ef4444; }
+.seg-nt { background: #cbd5e1; }
+.seg-na { background: #ede9d8; }
+.detail-row-counts { width: 170px; flex-shrink: 0; font-size: 11px; color: var(--text-secondary); }
 
 .dash-sheets {
   display: flex;
