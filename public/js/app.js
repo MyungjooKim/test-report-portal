@@ -470,12 +470,15 @@ function renderDateGroups(grouped) {
         </div>
         <div class="report-items">
           ${reports.map(r => {
-            const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : r.type === 'gsheet' ? '📊' : '📄';
-            const typeBadge = r.type === 'folder' ? '<span class="type-badge">ZIP</span>' 
+            const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : r.type === 'gsheet' ? '📊' : r.type === 'diagram' ? '📈' : '📄';
+            const typeBadge = r.type === 'folder' ? '<span class="type-badge">ZIP</span>'
               : r.type === 'markdown' ? '<span class="type-badge md">MD</span>'
-              : r.type === 'gsheet' ? '<span class="type-badge gsheet">Sheets</span>' : '';
+              : r.type === 'gsheet' ? '<span class="type-badge gsheet">Sheets</span>'
+              : r.type === 'diagram' ? '<span class="type-badge diagram">Diagram</span>' : '';
             // 행(제목) 클릭 = 대시보드 토글, 결과서 열람은 전용 버튼(📄)으로
             const viewBtn = `<button class="btn-icon-sm" onclick="event.stopPropagation(); viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')" title="결과서 보기">📄</button>`;
+            // 다이어그램/MD 원본 파일은 렌더 페이지로 새 탭 열기
+            const directUrl = r.type === 'diagram' ? `/api/reports/${r.id}/render` : `/uploads/${r.indexPath}`;
             const refreshBtn = r.type === 'gsheet'
               ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); refreshReport('${r.id}')" title="최신 데이터로 새로고침">🔄</button>` : '';
             return `
@@ -488,7 +491,7 @@ function renderDateGroups(grouped) {
               <div class="ri-actions">
                 ${viewBtn}
                 ${refreshBtn}
-                <button class="btn-icon-sm" onclick="event.stopPropagation(); openReportDirect('${escapeAttr(r.indexPath)}')" title="새 탭에서 열기">↗</button>
+                <button class="btn-icon-sm" onclick="event.stopPropagation(); openReportDirect('${escapeAttr(directUrl)}')" title="새 탭에서 열기">↗</button>
                 <button class="btn-icon-sm danger" onclick="event.stopPropagation(); deleteReport('${r.id}')" title="삭제">🗑</button>
               </div>
             </div>
@@ -514,21 +517,32 @@ async function loadAndShowReport(projectId, reportId) {
   }
 
   if (report) {
-    if (report.type === 'markdown') {
+    if (report.type === 'markdown' || report.type === 'diagram') {
       currentReportUrl = `/api/reports/${report.id}/render`;
     } else {
       currentReportUrl = `/uploads/${report.indexPath}`;
     }
     document.getElementById('viewerTitle').textContent = report.originalName;
-    document.getElementById('viewerFrame').src = currentReportUrl;
+    setViewerFrameUrl(currentReportUrl);
     showView('reportViewer');
   } else {
     navigateTo(`#project/${projectId}`);
   }
 }
 
+// iframe 로드를 히스토리에 쌓지 않고 수행 — src 대입은 조인트 히스토리에 항목이 추가되어
+// 브라우저 뒤로가기를 두 번 눌러야 하는 문제(1회차: iframe 만 about:blank) 발생
+function setViewerFrameUrl(url) {
+  const frame = document.getElementById('viewerFrame');
+  try {
+    frame.contentWindow.location.replace(url || 'about:blank');
+  } catch (e) {
+    frame.src = url; // 교차 출처 등으로 접근 불가 시 폴백
+  }
+}
+
 function goBackToProject() {
-  document.getElementById('viewerFrame').src = '';
+  setViewerFrameUrl('');
   hideViewerJump();
   if (currentProjectId) {
     navigateTo(`#project/${currentProjectId}`);
@@ -687,8 +701,8 @@ function viewerJumpTo(i) {
   setTimeout(() => { el.style.backgroundColor = orig; }, 1600);
 }
 
-function openReportDirect(indexPath) {
-  window.open(`/uploads/${indexPath}`, '_blank');
+function openReportDirect(url) {
+  window.open(url, '_blank');
 }
 
 // ===== Upload =====
@@ -795,6 +809,9 @@ async function deleteReport(id) {
 
 // ===== Report Dashboard =====
 async function toggleDashboard(reportId, reportType) {
+  // 다이어그램은 통계 대시보드가 없으므로 바로 뷰어로
+  if (reportType === 'diagram') return viewReport(reportId);
+
   const el = document.getElementById(`dashboard-${reportId}`);
   if (!el) return;
 
@@ -1290,6 +1307,8 @@ function openUploadModal() {
   renderFileList();
   document.getElementById('uploadBtn').disabled = true;
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('diagramCode').value = '';
+  document.getElementById('diagramName').value = '';
   switchUploadTab('file');
   openModal('uploadModal');
 }
@@ -1298,11 +1317,13 @@ let currentUploadTab = 'file';
 
 function switchUploadTab(tab) {
   currentUploadTab = tab;
+  const tabOrder = ['file', 'gsheet', 'diagram'];
   document.querySelectorAll('.upload-tab').forEach((el, i) => {
-    el.classList.toggle('active', (i === 0 && tab === 'file') || (i === 1 && tab === 'gsheet'));
+    el.classList.toggle('active', tabOrder[i] === tab);
   });
   document.getElementById('uploadTabFile').classList.toggle('active', tab === 'file');
   document.getElementById('uploadTabGsheet').classList.toggle('active', tab === 'gsheet');
+  document.getElementById('uploadTabDiagram').classList.toggle('active', tab === 'diagram');
 
   // 버튼 텍스트/활성화 변경
   const btn = document.getElementById('uploadBtn');
@@ -1311,10 +1332,57 @@ function switchUploadTab(tab) {
     btn.onclick = importGoogleSheet;
     const url = document.getElementById('gsheetUrl').value.trim();
     btn.disabled = !url;
+  } else if (tab === 'diagram') {
+    btn.textContent = '업로드';
+    btn.onclick = uploadDiagram;
+    btn.disabled = !document.getElementById('diagramCode').value.trim();
   } else {
     btn.textContent = '업로드';
     btn.onclick = uploadFiles;
     btn.disabled = selectedFiles.length === 0;
+  }
+}
+
+// ===== 다이어그램 업로드 =====
+async function uploadDiagram() {
+  const content = document.getElementById('diagramCode').value.trim();
+  if (!currentProjectId || !content) return;
+
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true;
+  btn.textContent = '업로드 중...';
+
+  const uploaderName = document.getElementById('uploaderName').value.trim() || '익명';
+  localStorage.setItem('uploaderName', uploaderName);
+
+  try {
+    const result = await api(`/api/projects/${currentProjectId}/diagrams`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: document.getElementById('diagramName').value.trim(),
+        content,
+        date: document.getElementById('uploadDate').value,
+        uploadedBy: uploaderName
+      })
+    });
+
+    if (result.error) {
+      showToast(`❌ ${result.error}`, 'error');
+      return;
+    }
+
+    document.getElementById('diagramCode').value = '';
+    document.getElementById('diagramName').value = '';
+    closeModal('uploadModal');
+    showToast('✅ 다이어그램 업로드 완료', 'success');
+    await loadProjects();
+    showProjectView(currentProjectId);
+  } catch (e) {
+    showToast('❌ 업로드 실패: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '업로드';
   }
 }
 
@@ -1389,11 +1457,32 @@ async function importGoogleSheet() {
   }
 }
 
-// gsheet URL 입력 시 버튼 활성화
+// gsheet URL / 다이어그램 코드 입력 시 버튼 활성화
 document.addEventListener('input', (e) => {
   if (e.target.id === 'gsheetUrl' && currentUploadTab === 'gsheet') {
     document.getElementById('uploadBtn').disabled = !e.target.value.trim();
   }
+  if (e.target.id === 'diagramCode' && currentUploadTab === 'diagram') {
+    document.getElementById('uploadBtn').disabled = !e.target.value.trim();
+  }
+});
+
+// 다이어그램 파일 불러오기 → 코드 입력창에 내용 주입
+document.addEventListener('change', (e) => {
+  if (e.target.id !== 'diagramFileInput') return;
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    document.getElementById('diagramCode').value = reader.result;
+    const nameInput = document.getElementById('diagramName');
+    if (!nameInput.value.trim()) nameInput.value = file.name.replace(/\.(mmd|mermaid|txt|md)$/i, '');
+    if (currentUploadTab === 'diagram') {
+      document.getElementById('uploadBtn').disabled = !reader.result.trim();
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
 });
 
 // ===== View Switching =====
@@ -1402,7 +1491,7 @@ function showView(viewId) {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   });
   if (viewId !== 'reportViewer') {
-    document.getElementById('viewerFrame').src = '';
+    setViewerFrameUrl('');
   }
 }
 
@@ -1613,7 +1702,7 @@ function renderSearchResults(results, query) {
   }
 
   container.innerHTML = results.map(r => {
-    const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : '📄';
+    const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : r.type === 'diagram' ? '📈' : '📄';
     const snippetHtml = r.snippets && r.snippets.length > 0
       ? `<div class="search-snippets">${r.snippets.map(s => `<span class="snippet">${highlightKeywords(escapeHtml(s), query)}</span>`).join('')}</div>`
       : '';
