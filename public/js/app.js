@@ -1465,7 +1465,7 @@ document.addEventListener('change', (e) => {
   reader.onload = () => {
     document.getElementById('diagramCode').value = reader.result;
     const nameInput = document.getElementById('diagramName');
-    if (!nameInput.value.trim()) nameInput.value = file.name.replace(/\.(mmd|txt|md)$/i, '');
+    if (!nameInput.value.trim()) nameInput.value = file.name.replace(/\.(mmd|mermaid|txt|md)$/i, '');
     if (currentUploadTab === 'diagram') {
       document.getElementById('uploadBtn').disabled = !reader.result.trim();
     }

@@ -145,10 +145,10 @@ const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (['.html', '.zip', '.md', '.mmd'].includes(ext)) {
+    if (['.html', '.zip', '.md', '.mmd', '.mermaid'].includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('HTML, ZIP, MD 또는 MMD 파일만 업로드 가능합니다.'));
+      cb(new Error('HTML, ZIP, MD 또는 MMD/Mermaid 파일만 업로드 가능합니다.'));
     }
   },
   limits: { fileSize: 200 * 1024 * 1024 }
@@ -588,15 +588,16 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
       };
       db.reports.push(report);
       newReports.push(report);
-    } else if (ext === '.md' || ext === '.mmd') {
+    } else if (ext === '.md' || ext === '.mmd' || ext === '.mermaid') {
+      const isDiagram = ext !== '.md';
       const filePath = path.join(REPORTS_DIR, file.filename);
-      const searchIndex = extractSearchIndex(filePath, ext === '.mmd' ? 'diagram' : 'markdown');
+      const searchIndex = extractSearchIndex(filePath, isDiagram ? 'diagram' : 'markdown');
 
       const report = {
         id: uuidv4(),
         projectId: req.params.id,
         originalName,
-        type: ext === '.mmd' ? 'diagram' : 'markdown',
+        type: isDiagram ? 'diagram' : 'markdown',
         fileName: file.filename,
         indexPath: file.filename,
         date,
@@ -1390,7 +1391,19 @@ app.get('/api/reports/:id/render', (req, res) => {
 
   if (report.type === 'diagram') {
     // .mmd 전체가 mermaid 코드 — textContent 로 읽히므로 HTML 이스케이프가 안전하다
-    htmlContent = `<pre class="mermaid">${escapeHtmlServer(rawContent)}</pre>`;
+    // 코드 보기/수정 패널 포함 (저장 → PATCH → 다시 그리기)
+    htmlContent = `<div class="diagram-toolbar">
+    <button id="toggleCodeBtn" class="tb-btn">&lt;/&gt; 코드</button>
+    <span id="saveStatus"></span>
+  </div>
+  <pre class="mermaid">${escapeHtmlServer(rawContent)}</pre>
+  <div id="codePanel" class="code-panel" hidden>
+    <textarea id="codeEditor" spellcheck="false">${escapeHtmlServer(rawContent)}</textarea>
+    <div class="code-actions">
+      <button id="saveCodeBtn" class="tb-btn primary">💾 저장 후 다시 그리기</button>
+      <button id="copyCodeBtn" class="tb-btn">📋 복사</button>
+    </div>
+  </div>`;
     hasMermaid = true;
   } else {
     // ```mermaid 펜스 → 렌더 블록 치환 후 marked 처리 (pre 는 raw HTML 로 통과)
@@ -1405,6 +1418,37 @@ app.get('/api/reports/:id/render', (req, res) => {
     ? `<script src="/vendor/mermaid/mermaid.min.js?v=${APP_PKG_VERSION}"></script>
   <script>mermaid.initialize({ startOnLoad: true, securityLevel: 'strict' });</script>`
     : '';
+
+  // 다이어그램 코드 보기/수정 스크립트 (diagram 타입 전용)
+  const editorScript = report.type !== 'diagram' ? '' : `<script>
+  (function () {
+    var reportId = ${JSON.stringify(report.id)};
+    var panel = document.getElementById('codePanel');
+    var status = document.getElementById('saveStatus');
+    document.getElementById('toggleCodeBtn').addEventListener('click', function () {
+      panel.hidden = !panel.hidden;
+    });
+    document.getElementById('copyCodeBtn').addEventListener('click', function () {
+      navigator.clipboard.writeText(document.getElementById('codeEditor').value).then(function () {
+        status.textContent = '복사됨';
+        setTimeout(function () { status.textContent = ''; }, 1500);
+      });
+    });
+    document.getElementById('saveCodeBtn').addEventListener('click', function () {
+      var content = document.getElementById('codeEditor').value.trim();
+      if (!content) { alert('다이어그램 코드가 비어 있습니다.'); return; }
+      status.textContent = '저장 중...';
+      fetch('/api/reports/' + reportId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: content })
+      }).then(function (r) { return r.json(); }).then(function (d) {
+        if (d.error) { status.textContent = ''; alert(d.error); return; }
+        location.reload();
+      }).catch(function (e) { status.textContent = ''; alert('저장 실패: ' + e.message); });
+    });
+  })();
+  </script>`;
 
   const fullHtml = `<!DOCTYPE html>
 <html lang="ko">
@@ -1439,6 +1483,23 @@ app.get('/api/reports/:id/render', (req, res) => {
     }
     pre code { background: transparent; padding: 0; color: inherit; }
     pre.mermaid { background: transparent; color: inherit; text-align: center; overflow-x: auto; }
+    .diagram-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .tb-btn {
+      font: inherit; font-size: 13px; padding: 6px 12px;
+      border: 1px solid #d1d5db; border-radius: 6px; background: #fff; cursor: pointer;
+    }
+    .tb-btn:hover { background: #f3f4f6; }
+    .tb-btn.primary { background: #4f8cff; border-color: #4f8cff; color: #fff; }
+    .tb-btn.primary:hover { background: #3b7ae8; }
+    .code-panel { margin-top: 12px; }
+    .code-panel textarea {
+      width: 100%; min-height: 220px; box-sizing: border-box; padding: 12px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5;
+      border: 1px solid #d1d5db; border-radius: 8px; background: #f8f9fb; color: #1a1d26;
+      white-space: pre; resize: vertical;
+    }
+    .code-actions { display: flex; gap: 8px; margin-top: 8px; }
+    #saveStatus { font-size: 12px; color: #16a34a; }
     table {
       border-collapse: collapse;
       width: 100%;
@@ -1464,20 +1525,35 @@ app.get('/api/reports/:id/render', (req, res) => {
     hr { border: none; border-top: 1px solid #e4e7ec; margin: 2em 0; }
   </style>
 </head>
-<body>${htmlContent}${mermaidScripts}</body>
+<body>${htmlContent}${mermaidScripts}${editorScript}</body>
 </html>`;
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(fullHtml);
 });
 
-// 리포트 메모 수정
+// 리포트 메모 수정 · 다이어그램 코드 수정
 app.patch('/api/reports/:id', (req, res) => {
   const db = loadDB();
   const report = db.reports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
 
   if (req.body.memo !== undefined) report.memo = req.body.memo;
+
+  if (req.body.content !== undefined) {
+    if (report.type !== 'diagram') {
+      return res.status(400).json({ error: '다이어그램 리포트만 코드를 수정할 수 있습니다.' });
+    }
+    const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+    if (!content) return res.status(400).json({ error: '다이어그램 코드가 없습니다.' });
+    if (content.length > 1024 * 1024) return res.status(400).json({ error: '다이어그램 코드가 너무 큽니다. (최대 1MB)' });
+
+    const filePath = path.join(REPORTS_DIR, report.fileName);
+    fs.writeFileSync(filePath, content, 'utf-8');
+    report.searchIndex = extractSearchIndex(filePath, 'diagram');
+    report.updatedAt = new Date().toISOString();
+  }
+
   saveDB(db);
   res.json({ success: true, report });
 });
