@@ -475,6 +475,7 @@ function renderDateGroups(grouped) {
               : r.type === 'markdown' ? '<span class="type-badge md">MD</span>'
               : r.type === 'gsheet' ? '<span class="type-badge gsheet">Sheets</span>'
               : r.type === 'diagram' ? '<span class="type-badge diagram">Diagram</span>' : '';
+            const autoBadge = r.automation ? '<span class="type-badge automation" title="자동화 테스트 결과">🤖 자동화</span>' : '';
             // 행(제목) 클릭 = 대시보드 토글, 결과서 열람은 전용 버튼(📄)으로
             const viewBtn = `<button class="btn-icon-sm" onclick="event.stopPropagation(); viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')" title="결과서 보기">📄</button>`;
             // 다이어그램/MD 원본 파일은 렌더 페이지로 새 탭 열기
@@ -485,7 +486,7 @@ function renderDateGroups(grouped) {
             <div class="report-item" onclick="toggleDashboard('${r.id}', '${r.type}')" title="클릭하면 대시보드가 펼쳐집니다">
               <span class="ri-icon">${typeIcon}</span>
               <div class="ri-info">
-                <div class="ri-name">${escapeHtml(r.originalName)} ${typeBadge}</div>
+                <div class="ri-name">${escapeHtml(r.originalName)} ${typeBadge}${autoBadge}</div>
                 <div class="ri-meta">${r.uploadedBy} · ${formatTime(r.uploadedAt)}${r.lastRefreshedAt ? ' · 🔄 ' + formatTime(r.lastRefreshedAt) : ''}</div>
               </div>
               <div class="ri-actions">
@@ -775,6 +776,7 @@ async function uploadFiles() {
 
   const uploaderName = document.getElementById('uploaderName').value.trim() || '익명';
   formData.append('uploadedBy', uploaderName);
+  if (document.getElementById('uploadAutomation').checked) formData.append('automation', '1');
   localStorage.setItem('uploaderName', uploaderName);
 
   try {
@@ -890,6 +892,17 @@ function renderDashboardPanel(stats, reportId, aiOn) {
     </div>
   ` : '';
 
+  // 상세 대시보드 — 특징 축(거래소/기기/테스터 등)이 감지된 리포트만 버튼 노출
+  const detailHtml = stats.detailAvailable ? `
+    <div class="dash-section">
+      <button type="button" class="dash-fail-toggle" onclick="toggleDetailDashboard('${reportId}')">
+        📊 상세 대시보드 (특징 축 ${stats.detailAxes}개)
+        <span class="fail-caret" id="detail-caret-${reportId}">▸ 펼쳐보기</span>
+      </button>
+      <div class="dash-detail hidden" id="detail-${reportId}"></div>
+    </div>
+  ` : '';
+
   return `
     <div class="dash-panel">
       <div class="dash-summary">
@@ -914,6 +927,7 @@ function renderDashboardPanel(stats, reportId, aiOn) {
         </div>
       </div>
       <div class="dash-section dash-custom-section hidden" id="custom-metrics-${reportId}"></div>
+      ${detailHtml}
       ${sheetsHtml}
       ${failHtml}
       ${aiOn && stats.fail > 0 ? `<div class="dash-section fail-analysis" id="fail-analysis-${reportId}"></div>` : ''}
@@ -928,6 +942,84 @@ function toggleFailList(reportId) {
   if (!list) return;
   list.classList.toggle('hidden');
   if (caret) caret.textContent = list.classList.contains('hidden') ? '▸ 펼쳐보기' : '▾ 접기';
+}
+
+// ===== 상세 대시보드 (특징 축별 결과 분포) =====
+
+async function toggleDetailDashboard(reportId) {
+  const el = document.getElementById(`detail-${reportId}`);
+  const caret = document.getElementById(`detail-caret-${reportId}`);
+  if (!el) return;
+  if (!el.classList.contains('hidden')) {
+    el.classList.add('hidden');
+    if (caret) caret.textContent = '▸ 펼쳐보기';
+    return;
+  }
+  el.classList.remove('hidden');
+  if (caret) caret.textContent = '▾ 접기';
+  if (el.dataset.loaded) return;
+
+  el.innerHTML = '<div class="dashboard-loading"><div class="loading-spinner-sm"></div> 상세 분석 중...</div>';
+  try {
+    const d = await api(`/api/reports/${reportId}/stats/detail`);
+    if (d.error) {
+      el.innerHTML = `<div class="dashboard-empty">${escapeHtml(d.error)}</div>`;
+      return;
+    }
+    el.innerHTML = renderDetailPanel(d);
+    el.dataset.loaded = '1';
+  } catch (e) {
+    el.innerHTML = '<div class="dashboard-empty">상세 통계 계산에 실패했습니다.</div>';
+  }
+}
+
+// 스택 바 한 줄: 라벨 | Pass/Fail/N-T/N-A 누적 바 | 건수
+function renderStackRow(label, c) {
+  const denom = c.total + (c.na || 0);
+  if (!denom) return '';
+  const seg = (n, cls, title) => n ? `<div class="stack-seg ${cls}" style="width:${(n / denom * 100).toFixed(1)}%" title="${title} ${n}건"></div>` : '';
+  const counts = [
+    c.pass ? `P ${c.pass}` : '',
+    c.fail ? `F ${c.fail}` : '',
+    c.nt ? `N/T ${c.nt}` : '',
+    c.na ? `N/A ${c.na}` : '',
+  ].filter(Boolean).join(' · ');
+  return `
+    <div class="detail-row">
+      <span class="detail-row-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+      <div class="detail-stack">
+        ${seg(c.pass, 'seg-pass', 'Pass')}${seg(c.fail, 'seg-fail', 'Fail')}${seg(c.nt, 'seg-nt', 'N/T')}${seg(c.na, 'seg-na', 'N/A')}
+      </div>
+      <span class="detail-row-counts">${counts}</span>
+    </div>`;
+}
+
+function renderDetailPanel(d) {
+  const deviceRows = (d.devices || []).map(dev => renderStackRow(dev.name, dev)).join('');
+  const devicesHtml = deviceRows ? `
+    <div class="detail-group">
+      <div class="dash-section-title">결과 컬럼별 (기기·테스터·환경)</div>
+      ${deviceRows}
+    </div>` : '';
+
+  const axesHtml = (d.axes || []).map(ax => {
+    const rows = ax.values.map(v => renderStackRow(v.value, v)).join('');
+    return rows ? `
+      <div class="detail-group">
+        <div class="dash-section-title">${escapeHtml(ax.name)}</div>
+        ${rows}
+      </div>` : '';
+  }).join('');
+
+  if (!devicesHtml && !axesHtml) return '<div class="dashboard-empty">표시할 특징 축이 없습니다.</div>';
+  return `
+    <div class="detail-legend">
+      <span class="legend-item"><i class="legend-dot seg-pass"></i>Pass</span>
+      <span class="legend-item"><i class="legend-dot seg-fail"></i>Fail</span>
+      <span class="legend-item"><i class="legend-dot seg-nt"></i>N/T</span>
+      <span class="legend-item"><i class="legend-dot seg-na"></i>N/A</span>
+    </div>
+    ${devicesHtml}${axesHtml}`;
 }
 
 // ===== Fail 분석 및 결함 후보 (자동 생성 — Fail 있을 때만) =====
@@ -1309,6 +1401,7 @@ function openUploadModal() {
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
   document.getElementById('diagramCode').value = '';
   document.getElementById('diagramName').value = '';
+  document.getElementById('uploadAutomation').checked = false;
   switchUploadTab('file');
   openModal('uploadModal');
 }
@@ -1433,7 +1526,8 @@ async function importGoogleSheet() {
         url,
         projectId: currentProjectId,
         date: document.getElementById('uploadDate').value,
-        uploadedBy: uploaderName
+        uploadedBy: uploaderName,
+        automation: document.getElementById('uploadAutomation').checked
       })
     });
 
