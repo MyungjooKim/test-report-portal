@@ -523,15 +523,26 @@ async function loadAndShowReport(projectId, reportId) {
       currentReportUrl = `/uploads/${report.indexPath}`;
     }
     document.getElementById('viewerTitle').textContent = report.originalName;
-    document.getElementById('viewerFrame').src = currentReportUrl;
+    setViewerFrameUrl(currentReportUrl);
     showView('reportViewer');
   } else {
     navigateTo(`#project/${projectId}`);
   }
 }
 
+// iframe 로드를 히스토리에 쌓지 않고 수행 — src 대입은 조인트 히스토리에 항목이 추가되어
+// 브라우저 뒤로가기를 두 번 눌러야 하는 문제(1회차: iframe 만 about:blank) 발생
+function setViewerFrameUrl(url) {
+  const frame = document.getElementById('viewerFrame');
+  try {
+    frame.contentWindow.location.replace(url || 'about:blank');
+  } catch (e) {
+    frame.src = url; // 교차 출처 등으로 접근 불가 시 폴백
+  }
+}
+
 function goBackToProject() {
-  document.getElementById('viewerFrame').src = '';
+  setViewerFrameUrl('');
   hideViewerJump();
   if (currentProjectId) {
     navigateTo(`#project/${currentProjectId}`);
@@ -1480,7 +1491,7 @@ function showView(viewId) {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   });
   if (viewId !== 'reportViewer') {
-    document.getElementById('viewerFrame').src = '';
+    setViewerFrameUrl('');
   }
 }
 

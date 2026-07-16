@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2] - 2026-07-16
+
+### Fixed — 뒤로가기 두 번 눌러야 하는 문제 (전체 리포트 뷰어 공통)
+- iframe `src` 대입이 브라우저 조인트 히스토리에 항목을 추가해, 뒤로가기 1회차에
+  iframe 만 about:blank(하얀 화면)로 되돌아가던 문제 — `contentWindow.location.replace()` 로 전환
+- 다이어그램뿐 아니라 Markdown/HTML/ZIP 뷰어 전부 동일 증상이었음 (setViewerFrameUrl 헬퍼로 일원화)
+
 ## [0.7.1] - 2026-07-16
 
 ### Changed — 다이어그램 코드 패널 좌측 분할 배치
