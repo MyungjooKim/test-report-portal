@@ -145,10 +145,10 @@ const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
-    if (['.html', '.zip', '.md'].includes(ext)) {
+    if (['.html', '.zip', '.md', '.mmd'].includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('HTML, ZIP, 또는 MD 파일만 업로드 가능합니다.'));
+      cb(new Error('HTML, ZIP, MD 또는 MMD 파일만 업로드 가능합니다.'));
     }
   },
   limits: { fileSize: 200 * 1024 * 1024 }
@@ -260,6 +260,9 @@ app.get('/', (req, res) => sendHtmlWithVersion(res, 'index.html'));
 // 인증된 사용자만 정적 파일 접근
 app.use(express.static(path.join(__dirname, 'public'), STATIC_OPTS));
 
+// mermaid 브라우저 번들 — 다이어그램/Markdown 렌더 페이지에서만 로드
+app.use('/vendor/mermaid', express.static(path.join(__dirname, 'node_modules', 'mermaid', 'dist'), STATIC_OPTS));
+
 // 현재 사용자 정보 API
 app.get('/api/me', (req, res) => {
   res.json(req.session.googleUser || null);
@@ -328,7 +331,13 @@ function extractSearchIndex(filePath, type) {
     const content = fs.readFileSync(filePath, 'utf-8');
     const tokens = [];
 
-    if (type === 'markdown') {
+    if (type === 'diagram') {
+      // mermaid 코드에서 텍스트 라인 추출 (%% 주석 제외)
+      for (const line of content.split('\n')) {
+        const t = line.trim();
+        if (t && !t.startsWith('%%')) tokens.push(t);
+      }
+    } else if (type === 'markdown') {
       // MD에서 헤딩, 텍스트 추출
       const lines = content.split('\n');
       for (const line of lines) {
@@ -579,15 +588,15 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
       };
       db.reports.push(report);
       newReports.push(report);
-    } else if (ext === '.md') {
+    } else if (ext === '.md' || ext === '.mmd') {
       const filePath = path.join(REPORTS_DIR, file.filename);
-      const searchIndex = extractSearchIndex(filePath, 'markdown');
+      const searchIndex = extractSearchIndex(filePath, ext === '.mmd' ? 'diagram' : 'markdown');
 
       const report = {
         id: uuidv4(),
         projectId: req.params.id,
         originalName,
-        type: 'markdown',
+        type: ext === '.mmd' ? 'diagram' : 'markdown',
         fileName: file.filename,
         indexPath: file.filename,
         date,
@@ -622,6 +631,38 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
 
   saveDB(db);
   res.json({ success: true, reports: newReports });
+});
+
+// 다이어그램 업로드 — mermaid 코드 붙여넣기 (JSON body, 파일 업로드 없이)
+app.post('/api/projects/:id/diagrams', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+
+  const content = typeof req.body.content === 'string' ? req.body.content.trim() : '';
+  if (!content) return res.status(400).json({ error: '다이어그램 코드가 없습니다.' });
+  if (content.length > 1024 * 1024) return res.status(400).json({ error: '다이어그램 코드가 너무 큽니다. (최대 1MB)' });
+
+  const name = (typeof req.body.name === 'string' && req.body.name.trim()) || '다이어그램';
+  const fileName = `diagram-${uuidv4()}.mmd`;
+  fs.writeFileSync(path.join(REPORTS_DIR, fileName), content, 'utf-8');
+
+  const report = {
+    id: uuidv4(),
+    projectId: req.params.id,
+    originalName: name,
+    type: 'diagram',
+    fileName,
+    indexPath: fileName,
+    date: req.body.date || new Date().toISOString().slice(0, 10),
+    uploadedBy: req.body.uploadedBy || '익명',
+    uploadedAt: new Date().toISOString(),
+    memo: '',
+    searchIndex: extractSearchIndex(path.join(REPORTS_DIR, fileName), 'diagram'),
+  };
+  db.reports.push(report);
+  saveDB(db);
+  res.json({ success: true, report });
 });
 
 // 리포트 삭제
@@ -1331,18 +1372,39 @@ app.post('/api/reports/:id/chat', async (req, res) => {
   res.end();
 });
 
-// Markdown 렌더링 엔드포인트
+// Markdown / 다이어그램 렌더링 엔드포인트
 app.get('/api/reports/:id/render', (req, res) => {
   const db = loadDB();
   const report = db.reports.find(r => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: '리포트를 찾을 수 없습니다.' });
-  if (report.type !== 'markdown') return res.status(400).json({ error: 'Markdown 리포트가 아닙니다.' });
+  if (report.type !== 'markdown' && report.type !== 'diagram') {
+    return res.status(400).json({ error: '렌더링을 지원하지 않는 리포트 형식입니다.' });
+  }
 
   const filePath = path.join(REPORTS_DIR, report.fileName);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: '파일을 찾을 수 없습니다.' });
 
-  const mdContent = fs.readFileSync(filePath, 'utf-8');
-  const htmlContent = marked(mdContent);
+  const rawContent = fs.readFileSync(filePath, 'utf-8');
+  let htmlContent;
+  let hasMermaid = false;
+
+  if (report.type === 'diagram') {
+    // .mmd 전체가 mermaid 코드 — textContent 로 읽히므로 HTML 이스케이프가 안전하다
+    htmlContent = `<pre class="mermaid">${escapeHtmlServer(rawContent)}</pre>`;
+    hasMermaid = true;
+  } else {
+    // ```mermaid 펜스 → 렌더 블록 치환 후 marked 처리 (pre 는 raw HTML 로 통과)
+    const mdContent = rawContent.replace(/```mermaid[ \t]*\r?\n([\s\S]*?)```/g, (_, code) => {
+      hasMermaid = true;
+      return `<pre class="mermaid">${escapeHtmlServer(code)}</pre>`;
+    });
+    htmlContent = marked(mdContent);
+  }
+
+  const mermaidScripts = hasMermaid
+    ? `<script src="/vendor/mermaid/mermaid.min.js?v=${APP_PKG_VERSION}"></script>
+  <script>mermaid.initialize({ startOnLoad: true, securityLevel: 'strict' });</script>`
+    : '';
 
   const fullHtml = `<!DOCTYPE html>
 <html lang="ko">
@@ -1376,6 +1438,7 @@ app.get('/api/reports/:id/render', (req, res) => {
       overflow-x: auto;
     }
     pre code { background: transparent; padding: 0; color: inherit; }
+    pre.mermaid { background: transparent; color: inherit; text-align: center; overflow-x: auto; }
     table {
       border-collapse: collapse;
       width: 100%;
@@ -1401,7 +1464,7 @@ app.get('/api/reports/:id/render', (req, res) => {
     hr { border: none; border-top: 1px solid #e4e7ec; margin: 2em 0; }
   </style>
 </head>
-<body>${htmlContent}</body>
+<body>${htmlContent}${mermaidScripts}</body>
 </html>`;
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');

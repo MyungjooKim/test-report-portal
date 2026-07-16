@@ -144,6 +144,7 @@
         <div class="upload-tabs">
           <button class="upload-tab active" onclick="switchUploadTab('file')">📁 파일 업로드</button>
           <button class="upload-tab" onclick="switchUploadTab('gsheet')">📊 Google Sheets</button>
+          <button class="upload-tab" onclick="switchUploadTab('diagram')">📈 다이어그램</button>
         </div>
 
         <!-- 파일 업로드 탭 -->
@@ -164,6 +165,24 @@
           <div class="form-group">
             <label>Spreadsheet URL</label>
             <input type="text" id="gsheetUrl" class="form-input" placeholder="URL 또는 Spreadsheet ID">
+          </div>
+        </div>
+
+        <!-- 다이어그램 탭 -->
+        <div class="upload-tab-content" id="uploadTabDiagram">
+          <div class="form-group">
+            <label>다이어그램 이름</label>
+            <input type="text" id="diagramName" class="form-input" placeholder="예: 로그인 시퀀스">
+          </div>
+          <div class="form-group">
+            <label>Mermaid 코드</label>
+            <textarea id="diagramCode" class="form-input diagram-textarea" rows="10"
+              placeholder="flowchart TD&#10;    A[시작] --> B{조건}&#10;    B -->|Yes| C[처리]&#10;    B -->|No| D[종료]"></textarea>
+          </div>
+          <div class="diagram-file-row">
+            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('diagramFileInput').click()">📂 파일 불러오기</button>
+            <span class="upload-hint">.mmd / .txt / .md 파일 내용을 위 입력창으로 불러옵니다</span>
+            <input type="file" id="diagramFileInput" accept=".mmd,.txt,.md" hidden>
           </div>
         </div>
 

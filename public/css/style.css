@@ -991,6 +991,28 @@ mark {
   color: #3730a3;
 }
 
+.type-badge.diagram {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* ===== 다이어그램 업로드 탭 ===== */
+.diagram-textarea {
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 180px;
+  white-space: pre;
+}
+
+.diagram-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
 
 /* ===== Toast ===== */
 .toast-container {
