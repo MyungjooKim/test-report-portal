@@ -1391,17 +1391,21 @@ app.get('/api/reports/:id/render', (req, res) => {
 
   if (report.type === 'diagram') {
     // .mmd 전체가 mermaid 코드 — textContent 로 읽히므로 HTML 이스케이프가 안전하다
-    // 코드 보기/수정 패널 포함 (저장 → PATCH → 다시 그리기)
+    // 코드 보기/수정 패널: 좌측 사이드(스티키) · 다이어그램 우측 (mermaid.live 스타일)
     htmlContent = `<div class="diagram-toolbar">
     <button id="toggleCodeBtn" class="tb-btn">&lt;/&gt; 코드</button>
     <span id="saveStatus"></span>
   </div>
-  <pre class="mermaid">${escapeHtmlServer(rawContent)}</pre>
-  <div id="codePanel" class="code-panel" hidden>
-    <textarea id="codeEditor" spellcheck="false">${escapeHtmlServer(rawContent)}</textarea>
-    <div class="code-actions">
-      <button id="saveCodeBtn" class="tb-btn primary">💾 저장 후 다시 그리기</button>
-      <button id="copyCodeBtn" class="tb-btn">📋 복사</button>
+  <div class="diagram-layout">
+    <div id="codePanel" class="code-panel" hidden>
+      <textarea id="codeEditor" spellcheck="false">${escapeHtmlServer(rawContent)}</textarea>
+      <div class="code-actions">
+        <button id="saveCodeBtn" class="tb-btn primary">💾 저장 후 다시 그리기</button>
+        <button id="copyCodeBtn" class="tb-btn">📋 복사</button>
+      </div>
+    </div>
+    <div class="diagram-area">
+      <pre class="mermaid">${escapeHtmlServer(rawContent)}</pre>
     </div>
   </div>`;
     hasMermaid = true;
@@ -1425,8 +1429,14 @@ app.get('/api/reports/:id/render', (req, res) => {
     var reportId = ${JSON.stringify(report.id)};
     var panel = document.getElementById('codePanel');
     var status = document.getElementById('saveStatus');
+    function setPanel(open) {
+      panel.hidden = !open;
+      // 저장 → 리로드 후에도 패널 상태 유지 (#code 해시)
+      history.replaceState(null, '', location.pathname + location.search + (open ? '#code' : ''));
+    }
+    if (location.hash === '#code') setPanel(true);
     document.getElementById('toggleCodeBtn').addEventListener('click', function () {
-      panel.hidden = !panel.hidden;
+      setPanel(panel.hidden);
     });
     document.getElementById('copyCodeBtn').addEventListener('click', function () {
       navigator.clipboard.writeText(document.getElementById('codeEditor').value).then(function () {
@@ -1483,6 +1493,7 @@ app.get('/api/reports/:id/render', (req, res) => {
     }
     pre code { background: transparent; padding: 0; color: inherit; }
     pre.mermaid { background: transparent; color: inherit; text-align: center; overflow-x: auto; }
+    body.diagram-page { max-width: none; }
     .diagram-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
     .tb-btn {
       font: inherit; font-size: 13px; padding: 6px 12px;
@@ -1491,14 +1502,20 @@ app.get('/api/reports/:id/render', (req, res) => {
     .tb-btn:hover { background: #f3f4f6; }
     .tb-btn.primary { background: #4f8cff; border-color: #4f8cff; color: #fff; }
     .tb-btn.primary:hover { background: #3b7ae8; }
-    .code-panel { margin-top: 12px; }
+    .diagram-layout { display: flex; gap: 20px; align-items: flex-start; }
+    .code-panel {
+      width: 40%; min-width: 320px; max-width: 640px; flex-shrink: 0;
+      position: sticky; top: 16px;
+      display: flex; flex-direction: column;
+    }
     .code-panel textarea {
-      width: 100%; min-height: 220px; box-sizing: border-box; padding: 12px;
+      width: 100%; height: calc(100vh - 150px); min-height: 260px; box-sizing: border-box; padding: 12px;
       font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5;
       border: 1px solid #d1d5db; border-radius: 8px; background: #f8f9fb; color: #1a1d26;
       white-space: pre; resize: vertical;
     }
     .code-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .diagram-area { flex: 1; min-width: 0; overflow-x: auto; }
     #saveStatus { font-size: 12px; color: #16a34a; }
     table {
       border-collapse: collapse;
@@ -1525,7 +1542,7 @@ app.get('/api/reports/:id/render', (req, res) => {
     hr { border: none; border-top: 1px solid #e4e7ec; margin: 2em 0; }
   </style>
 </head>
-<body>${htmlContent}${mermaidScripts}${editorScript}</body>
+<body class="${report.type === 'diagram' ? 'diagram-page' : ''}">${htmlContent}${mermaidScripts}${editorScript}</body>
 </html>`;
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
