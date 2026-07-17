@@ -479,7 +479,7 @@ function renderDateGroups(grouped) {
             // 행(제목) 클릭 = 대시보드 토글, 결과서 열람은 전용 버튼(📄)으로
             const viewBtn = `<button class="btn-icon-sm" onclick="event.stopPropagation(); viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')" title="결과서 보기">📄</button>`;
             // 다이어그램/MD 원본 파일은 렌더 페이지로 새 탭 열기
-            const directUrl = r.type === 'diagram' ? `/api/reports/${r.id}/render` : `/uploads/${r.indexPath}`;
+            const directUrl = (r.type === 'diagram' || r.type === 'markdown') ? `/api/reports/${r.id}/render` : `/uploads/${r.indexPath}`;
             const refreshBtn = r.type === 'gsheet'
               ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); refreshReport('${r.id}')" title="최신 데이터로 새로고침">🔄</button>` : '';
             return `
@@ -811,8 +811,8 @@ async function deleteReport(id) {
 
 // ===== Report Dashboard =====
 async function toggleDashboard(reportId, reportType) {
-  // 다이어그램은 통계 대시보드가 없으므로 바로 뷰어로
-  if (reportType === 'diagram') return viewReport(reportId);
+  // 다이어그램/MD 문서는 통계 대시보드가 없으므로 바로 뷰어로
+  if (reportType === 'diagram' || reportType === 'markdown') return viewReport(reportId);
 
   const el = document.getElementById(`dashboard-${reportId}`);
   if (!el) return;
