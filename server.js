@@ -191,9 +191,24 @@ app.use(express.json());
 
 // ──────────── 인증 미들웨어 ────────────
 
+// [service-hub] 포털 자신의 브라우저 기준 origin — 로그인 후 복귀(next)용.
+// Cloudflare/nginx 뒤에서는 X-Forwarded-* 를, 로컬에서는 Host 헤더를 사용한다.
+function portalOrigin(req) {
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+  const host = req.headers['x-forwarded-host'] || req.get('host');
+  return host ? `${proto}://${host}` : '';
+}
+
+// tcgen 로그인 URL — 원래 가려던 포털 화면을 next 로 실어 로그인 후 자동 복귀 (tcgen 이 화이트리스트 검증)
+function tcgenLoginUrl(req, returnPath) {
+  const origin = portalOrigin(req);
+  const next = origin ? origin + (returnPath || '/') : '';
+  return TCGEN_PUBLIC_URL + '/login' + (next ? '?next=' + encodeURIComponent(next) : '');
+}
+
 // 로그인 페이지 — 통합 모드면 tcgen 로그인으로 위임
 app.get('/login', (req, res) => {
-  if (INTEGRATED) return res.redirect(TCGEN_PUBLIC_URL + '/login');
+  if (INTEGRATED) return res.redirect(tcgenLoginUrl(req, '/'));
   sendHtmlWithVersion(res, 'login.html');
 });
 
@@ -259,8 +274,8 @@ async function requireAuth(req, res, next) {
     );
   }
 
-  // 그 외는 로그인 페이지로
-  res.redirect(INTEGRATED ? TCGEN_PUBLIC_URL + '/login' : '/login');
+  // 그 외는 로그인 페이지로 — 통합 모드는 원래 목적지(next)를 실어 로그인 후 자동 복귀
+  res.redirect(INTEGRATED ? tcgenLoginUrl(req, req.originalUrl) : '/login');
 }
 
 app.use(requireAuth);
@@ -285,6 +300,38 @@ app.get('/api/config', (req, res) => {
     integrated: INTEGRATED,
     tcgenUrl: TCGEN_PUBLIC_URL,
     aiEnabled: !!process.env.ANTHROPIC_API_KEY,
+  });
+});
+
+// [service-hub] 서비스 목록 — tcgen /apps 단일 소스 소비 (INTEGRATION_SPEC §6, 쿠키 포워딩)
+// tcgen 순단 시 마지막 성공 응답으로 폴백, 그것도 없으면 최소 기본 목록.
+let lastGoodApps = null;
+let lastGoodHubUrl = null;
+app.get('/api/apps', async (req, res) => {
+  if (INTEGRATED) {
+    const j = await tcgenGetJson('/apps', req.headers.cookie);
+    if (j && j.ok && Array.isArray(j.apps)) {
+      // 상대 경로(url: '/tc' 등)는 tcgen 공개 주소 기준으로 절대화
+      lastGoodApps = j.apps.map((a) => ({
+        ...a,
+        url: a.url && a.url.startsWith('/') ? TCGEN_PUBLIC_URL + a.url : a.url,
+      }));
+      // 허브 주소도 tcgen 이 단일 소스 — 분리 도메인(HUB_URL)이면 절대 URL 로 내려옴
+      const h = j.hub_url || '/';
+      lastGoodHubUrl = h.startsWith('/') ? TCGEN_PUBLIC_URL + h : h;
+    }
+    if (lastGoodApps) {
+      return res.json({ ok: true, apps: lastGoodApps, hubUrl: lastGoodHubUrl || TCGEN_PUBLIC_URL + '/' });
+    }
+  }
+  // 비통합 모드/폴백 — 포털 단독 실행용 최소 목록
+  res.json({
+    ok: true,
+    hubUrl: INTEGRATED ? TCGEN_PUBLIC_URL + '/' : '',
+    apps: [
+      { id: 'tc', name: 'Test Case Generator', desc: '기획서 → TC 자동 생성 · 갱신', color: '#3B5BDB', url: TCGEN_PUBLIC_URL + '/tc', soon: false, external_auth: false },
+      { id: 'tr', name: 'Test Result Portal', desc: '테스트 결과 리포트 관리', color: '#0F9D58', url: '/', soon: false, external_auth: false },
+    ],
   });
 });
 

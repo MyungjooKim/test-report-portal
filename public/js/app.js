@@ -68,8 +68,9 @@ function initSidebarResize() {
   });
 }
 
-// ===== QA 통합 — 9-dot 앱 런처 (INTEGRATION_SPEC §6.2 앱 레지스트리, 단일 소스) =====
+// ===== [service-hub] 9-dot 앱 런처 — 목록은 tcgen registry 단일 소스(/api/apps 프록시) =====
 let QA_CONFIG = null; // { integrated, tcgenUrl }
+let QA_APPS_CACHE = null; // /api/apps 응답 캐시 — { apps, hubUrl }
 const QA_CURRENT_APP = 'tr';
 
 async function initQaLauncher() {
@@ -78,20 +79,28 @@ async function initQaLauncher() {
     const btn = document.getElementById('launcherBtn');
     if (btn) btn.style.display = 'inline-flex';
   }
+  refreshQaApps();
+}
+
+async function refreshQaApps() {
+  const d = await api('/api/apps');
+  if (d && Array.isArray(d.apps) && d.apps.length) QA_APPS_CACHE = d;
 }
 
 function qaApps() {
+  if (QA_APPS_CACHE) return QA_APPS_CACHE.apps;
+  // 서버 목록을 아직 못 받은 극초기/장애 폴백 — 최소 목록
   const tcUrl = (QA_CONFIG && QA_CONFIG.tcgenUrl) || 'http://localhost:5001';
   return [
-    { id: 'tc', name: 'Test Case Generator', desc: '기획서 → TC 자동 생성 · 갱신', color: '#3B5BDB', url: tcUrl },
+    { id: 'tc', name: 'Test Case Generator', desc: '기획서 → TC 자동 생성 · 갱신', color: '#3B5BDB', url: tcUrl + '/tc' },
     { id: 'tr', name: 'Test Result Portal',  desc: '테스트 결과 리포트 관리',      color: '#0F9D58', url: '/' },
-    // 새 도구는 여기에 한 줄 추가
   ];
 }
 
 function toggleLauncher(e) {
   if (e) e.stopPropagation();
   if (document.getElementById('launcherMenu')) { closeLauncher(); return; }
+  refreshQaApps(); // 최신 목록 백그라운드 갱신 — 이번 렌더는 캐시 사용
   const overlay = document.createElement('div');
   overlay.id = 'launcherOverlay';
   overlay.onclick = closeLauncher;
@@ -123,7 +132,16 @@ function toggleLauncher(e) {
     txt.appendChild(ds);
     b.appendChild(ic);
     b.appendChild(txt);
-    if (appDef.id === QA_CURRENT_APP) {
+    if (appDef.soon) {
+      // 준비 중 — 클릭 불가 (registry 의 soon 플래그가 내려가면 자동 활성화)
+      b.disabled = true;
+      b.classList.add('lm-soon');
+      b.title = appDef.external_auth ? '준비 중 — 오픈 후 별도 로그인이 필요합니다' : '준비 중';
+      const cs = document.createElement('span');
+      cs.className = 'curmark lm-soonmark';
+      cs.textContent = '준비 중';
+      b.appendChild(cs);
+    } else if (appDef.id === QA_CURRENT_APP) {
       const cur = document.createElement('span');
       cur.className = 'curmark';
       cur.style.color = appDef.color;
@@ -135,6 +153,26 @@ function toggleLauncher(e) {
     wrap.appendChild(b);
   });
   m.appendChild(wrap);
+  // 하단 유틸 — 서비스 선택 허브 이동 · 통합 로그아웃 (TC/TR 만, TC Manager 는 별도 관리)
+  const hubUrl = (QA_APPS_CACHE && QA_APPS_CACHE.hubUrl) || (QA_CONFIG && QA_CONFIG.integrated ? QA_CONFIG.tcgenUrl + '/' : '');
+  const foot = document.createElement('div');
+  foot.className = 'lm-foot';
+  if (hubUrl) {
+    const hub = document.createElement('button');
+    hub.type = 'button';
+    hub.className = 'lm-foot-btn';
+    hub.textContent = '🏠 서비스 선택';
+    hub.onclick = () => { window.location.href = hubUrl; };
+    foot.appendChild(hub);
+  }
+  const lo = document.createElement('button');
+  lo.type = 'button';
+  lo.className = 'lm-foot-btn lm-logout';
+  lo.title = 'TC Generator · TR Portal 통합 로그아웃';
+  lo.textContent = '로그아웃';
+  lo.onclick = logout;
+  foot.appendChild(lo);
+  m.appendChild(foot);
   document.body.appendChild(overlay);
   document.body.appendChild(m);
 }
