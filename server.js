@@ -306,6 +306,7 @@ app.get('/api/config', (req, res) => {
 // [service-hub] 서비스 목록 — tcgen /apps 단일 소스 소비 (INTEGRATION_SPEC §6, 쿠키 포워딩)
 // tcgen 순단 시 마지막 성공 응답으로 폴백, 그것도 없으면 최소 기본 목록.
 let lastGoodApps = null;
+let lastGoodHubUrl = null;
 app.get('/api/apps', async (req, res) => {
   if (INTEGRATED) {
     const j = await tcgenGetJson('/apps', req.headers.cookie);
@@ -315,9 +316,12 @@ app.get('/api/apps', async (req, res) => {
         ...a,
         url: a.url && a.url.startsWith('/') ? TCGEN_PUBLIC_URL + a.url : a.url,
       }));
+      // 허브 주소도 tcgen 이 단일 소스 — 분리 도메인(HUB_URL)이면 절대 URL 로 내려옴
+      const h = j.hub_url || '/';
+      lastGoodHubUrl = h.startsWith('/') ? TCGEN_PUBLIC_URL + h : h;
     }
     if (lastGoodApps) {
-      return res.json({ ok: true, apps: lastGoodApps, hubUrl: TCGEN_PUBLIC_URL + '/' });
+      return res.json({ ok: true, apps: lastGoodApps, hubUrl: lastGoodHubUrl || TCGEN_PUBLIC_URL + '/' });
     }
   }
   // 비통합 모드/폴백 — 포털 단독 실행용 최소 목록
