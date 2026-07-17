@@ -1445,6 +1445,15 @@ mark {
 .lm-app .tt { font-size: 14px; font-weight: 600; color: #111827; }
 .lm-app .ds { font-size: 11.5px; color: #6b7280; }
 .lm-app .curmark { margin-left: auto; font-size: 10px; font-weight: 700; flex: none; }
+/* [service-hub] 준비 중 항목 + 하단 유틸(허브 이동·통합 로그아웃) */
+.lm-app.lm-soon { opacity: .55; cursor: default; }
+.lm-app.lm-soon:hover { background: none; }
+.lm-soonmark { color: #8a887f; border: 1px dashed #b4b2a9; border-radius: 999px; padding: 2px 8px; }
+.lm-foot { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #f3f4f6; background: #fafafc; }
+.lm-foot-btn { flex: 1; border: 1px solid #e4e7ec; background: #fff; border-radius: 8px; padding: 8px 10px; font-size: 12px; font-weight: 600; color: #374151; cursor: pointer; }
+.lm-foot-btn:hover { background: #f5f7fb; }
+.lm-foot-btn.lm-logout { color: #b91c1c; border-color: #fecaca; }
+.lm-foot-btn.lm-logout:hover { background: #fef2f2; }
 
 /* 런처(우상단 고정)와 페이지 헤더 버튼 겹침 방지 */
 .page-header { padding-right: 52px; }
