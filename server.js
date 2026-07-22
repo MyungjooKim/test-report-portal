@@ -15,7 +15,7 @@ const { computeStatsFromSheetData, collectFailItems } = require('./lib/report-st
 const { computeDetailStats } = require('./lib/detail-stats');
 const pwAdapter = require('./lib/adapters/playwright');
 const manualAdapter = require('./lib/adapters/manual-sheet');
-const { humanizeError } = require('./lib/error-humanize');
+const { humanizeError, elementName } = require('./lib/error-humanize');
 const XLSX = require('xlsx');
 const { consolidate } = require('./lib/consolidate');
 
@@ -2036,8 +2036,105 @@ app.post('/api/projects/:id/consolidated/chat', async (req, res) => {
   await streamSheetChat(res, `${loaded.project.name} — 통합 결과`, consolidatedAsSheetData(loaded.cons), history);
 });
 
+// 취합 Fail 분석 전용 규칙 — 역할별 섹션 없이 주제 중심 단일 문서 (2026-07-22 사용자 확정)
+const CONS_FAIL_ANALYSIS_RULES = `당신은 QA 결함 분석가다. 취합 결과의 Fail 목록과 서버 집계(facts — 정확한 수치)를 받아 분석한다.
+읽는 사람은 QA·개발·기획이 함께다 — 역할별로 섹션을 나누지 말고 모두가 같은 문서를 읽게 한다.
+
+출력 형식 (마크다운, 간결):
+### 집중 영역
+- 2~3줄. Fail·N/T 가 몰린 영역과 품질 하위 영역 — facts 수치만 인용.
+### 결함 클러스터
+- 동일 원인 의심 TC 묶음별 "TC 목록 — 근거 한 줄". facts.요소별_실패_상위 가 있으면 화면 요소 기준으로 묶고 "해소 시 N건 Pass 예상"을 붙인다.
+- 단독 Fail 은 "개별 확인 필요" 한 줄로 모은다.
+### 확인 필요
+- 불일치(매뉴얼·자동화 상충 → 재검 대상)·flaky·미태그·High 중요도 Fail — 있는 항목만 각 한 줄.
+### 커버리지·범위
+- 자동화 미커버 밀집 영역 / 전 거래소 공통 실패(공통 코드 의심) vs 단독 실패(해당 거래소 연동 의심) — 각 한 줄, 데이터 없으면 생략.
+### 수정 우선
+- 1~3개, 영향 범위 큰 순. "무엇을 고치면 몇 건이 풀리는지"를 명시.
+
+규칙: facts 에 없는 수치를 만들지 말 것. 추측은 "의심/가능성"으로 표기. 내용 없는 섹션은 출력하지 않는다. 전체 250단어 이내.`;
+
+// 결정적 집계(facts) — AI 는 해석만, 수치는 전부 서버 계산
+function buildConsAnalysisFacts(projectId, cons) {
+  const db = loadDB();
+  const records = db.records.filter(r => r.projectId === projectId);
+  const rows = cons.rows;
+
+  const suiteAx = (cons.axes || []).find(a => a.key === 'suite');
+  const suiteVals = (suiteAx ? suiteAx.values : []).filter(v => !/^기타 \(/.test(String(v.value)));
+  const worstSuites = suiteVals
+    .filter(v => v.pass + v.fail > 0)
+    .map(v => ({ 영역: v.value, Pass율: Math.round((v.pass / (v.pass + v.fail)) * 100), Fail: v.fail }))
+    .sort((a, b) => a.Pass율 - b.Pass율).slice(0, 3);
+  const ntSuites = suiteVals.filter(v => v.nt > 0)
+    .sort((a, b) => b.nt - a.nt).slice(0, 3).map(v => ({ 영역: v.value, 'N/T': v.nt }));
+
+  const mismatches = rows.filter(r => r.mismatch).map(r => `${r.tcId}${r.exchange ? `(${r.exchange})` : ''}`);
+  const flaky = [...new Set(rows.filter(r => Object.values(r.sources).some(c => c.flaky)).map(r => r.tcId))];
+
+  // 전 거래소 공통 실패 vs 단독 실패 — 원인 삼각측량(공통 코드 vs 거래소 연동)
+  const exCount = new Map(), failCount = new Map();
+  for (const r of rows) {
+    if (!r.exchange) continue;
+    exCount.set(r.tcId, (exCount.get(r.tcId) || 0) + 1);
+    if (r.final === 'Fail') failCount.set(r.tcId, (failCount.get(r.tcId) || 0) + 1);
+  }
+  let commonFail = 0; const soloFail = {};
+  for (const [tc, n] of failCount) {
+    const total = exCount.get(tc) || 0;
+    if (total >= 2 && n === total) commonFail++;
+    else if (n === 1 && total >= 2) {
+      const ex = (rows.find(r => r.tcId === tc && r.final === 'Fail') || {}).exchange;
+      if (ex) soloFail[ex] = (soloFail[ex] || 0) + 1;
+    }
+  }
+
+  // 화면 요소별 실패 집계 — errorDetail 의 Locator + testid 한국어 사전
+  const elemCounts = {};
+  for (const rec of records) {
+    if (rec.result !== 'Fail' || !rec.errorDetail) continue;
+    const loc = (rec.errorDetail.match(/Locator:\s*(.+)/) || [])[1];
+    if (!loc) continue;
+    const el = elementName(loc);
+    if (el) elemCounts[el] = (elemCounts[el] || 0) + 1;
+  }
+  const topElements = Object.entries(elemCounts).sort((a, b) => b[1] - a[1]).slice(0, 5)
+    .map(([요소, 건수]) => ({ 요소, 건수 }));
+
+  const failTcSet = new Set(rows.filter(r => r.final === 'Fail').map(r => r.tcId));
+  const highFails = [...new Set(records.filter(r => r.priority === 'High' && failTcSet.has(r.tcId)).map(r => r.tcId))];
+
+  // 자동화 미커버 밀집 영역 (자동화 소스가 있을 때만 의미)
+  let uncovered = [];
+  if ((cons.sources || []).includes('automation')) {
+    const bySuite = {}; const seen = new Set();
+    for (const r of rows) {
+      if (seen.has(r.tcId)) continue; seen.add(r.tcId);
+      if (!r.sources.automation && r.final !== 'N/A') {
+        const s = r.suite || '(미분류)';
+        bySuite[s] = (bySuite[s] || 0) + 1;
+      }
+    }
+    uncovered = Object.entries(bySuite).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([영역, 건수]) => ({ 영역, 건수 }));
+  }
+
+  return {
+    품질_하위_영역: worstSuites,
+    NT_밀집_영역: ntSuites,
+    불일치: { 건수: mismatches.length, TC: mismatches.slice(0, 20) },
+    flaky: { 건수: flaky.length, TC: flaky.slice(0, 10) },
+    미태그: cons.untagged ? cons.untagged.count : 0,
+    거래소_실패_구분: { 전거래소_공통_Fail_TC수: commonFail, 단독_Fail: soloFail },
+    요소별_실패_상위: topElements,
+    High중요도_Fail: { 건수: highFails.length, TC: highFails.slice(0, 15) },
+    자동화_미커버_밀집: uncovered,
+    소스_커버리지_퍼센트: cons.stats.coverage,
+  };
+}
+
 async function generateConsFailAnalysis(projectId, cons, fails, fingerprint) {
-  // 결정적 집계는 서버가 — 축별 분포 + 사유 패턴 상위. AI 는 클러스터링·해석만.
+  // 결정적 집계는 서버가 — 축별 분포 + 사유 패턴 + facts. AI 는 클러스터링·해석만.
   const dist = {};
   for (const ax of cons.axes || []) {
     dist[ax.name] = Object.fromEntries(ax.values.map(v => [String(v.value), { Fail: v.fail, Pass: v.pass, 'N/T': v.nt }]));
@@ -2048,10 +2145,11 @@ async function generateConsFailAnalysis(projectId, cons, fails, fingerprint) {
     model: 'claude-opus-4-8',
     max_tokens: 2000,
     thinking: { type: 'adaptive' },
-    system: FAIL_ANALYSIS_RULES,
+    system: CONS_FAIL_ANALYSIS_RULES,
     messages: [{
       role: 'user',
       content: JSON.stringify({
+        facts: buildConsAnalysisFacts(projectId, cons),
         분포_축별: dist,
         사유_패턴_상위: (cons.failReasons || []).map(g => ({ 패턴: g.pattern, 건수: g.count })),
         fail_목록: fails,
@@ -2093,7 +2191,8 @@ app.get('/api/projects/:id/consolidated/fail-analysis', async (req, res) => {
   }
 
   const crypto = require('crypto');
-  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(fails)).digest('hex');
+  // |v2: 분석 템플릿 개편(주제 중심 섹션 + facts 주입) — 프롬프트 버전이 바뀌면 캐시 재생성
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(fails) + '|v2').digest('hex');
   if (req.query.force !== '1' && project.failAnalysis && project.failAnalysis.fingerprint === fingerprint) {
     return res.json({ ok: true, cached: true, ...project.failAnalysis });
   }

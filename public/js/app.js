@@ -661,7 +661,13 @@ function consStackRow(axKey, v, filterable = true) {
     </div>`;
 }
 
-function setConsFilter(k) { consolidatedFilter = k; document.querySelectorAll('.cons-filter').forEach(b => b.classList.remove('active')); event.target.classList.add('active'); renderConsTable(); }
+function setConsFilter(k) {
+  consolidatedFilter = k;
+  // 사유 칩과 상태 필터의 AND 교집합이 0행이 되는 혼란 방지 — 상태 전환 시 사유 필터 해제
+  if (consReasonFilter !== null) { consReasonFilter = null; renderConsAxes(); }
+  renderConsFilters();
+  renderConsTable();
+}
 
 function setConsAxisFilter(key, value) {
   consAxisFilter = (consAxisFilter && consAxisFilter.key === key && consAxisFilter.value === value) ? null : { key, value };
@@ -715,7 +721,7 @@ function renderConsTable() {
   const capped = rows.slice(0, 1000);
 
   wrap.innerHTML = `
-    <div class="cons-count">${rows.length}행${rows.length > capped.length ? ` (상위 ${capped.length}만 표시)` : ''}</div>
+    <div class="cons-count">${rows.length ? `${rows.length}행${rows.length > capped.length ? ` (상위 ${capped.length}만 표시)` : ''}` : '조건에 맞는 행이 없습니다 — 상태 필터·사유 칩·검색어 조합을 확인하세요'}</div>
     <table class="cons-table">
       <thead><tr>
         <th>TC ID</th>${hasExch ? '<th>거래소</th>' : ''}

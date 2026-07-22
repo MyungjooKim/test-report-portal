@@ -116,6 +116,25 @@ test('결과 분류 — N/A·Blocked·한국어 어휘', () => {
   assert.equal(adapter.classify('아무말'), null);
 });
 
+// ── 중요도 수집 ─────────────────────────────────────────────────────────
+
+test('중요도 컬럼 — 높음/보통/Low 정규화, 대표값은 최고 등급', () => {
+  const input = {
+    'TC': [
+      ['TC ID', '항목', '중요도', '결과'],
+      ['SC-P-001', 'a', '높음', 'Fail'],
+      ['SC-P-002', 'b', 'Low', 'Pass'],
+      ['SC-P-003', 'c', '이상한값', 'Pass'],
+    ],
+  };
+  const { rows } = adapter.parse(input);
+  assert.equal(rows.find(r => r.tcId === 'SC-P-001').priority, 'High');
+  assert.equal(rows.find(r => r.tcId === 'SC-P-002').priority, 'Low');
+  assert.equal(rows.find(r => r.tcId === 'SC-P-003').priority, null);
+  assert.equal(adapter.normalizePriority('P1'), 'High');
+  assert.equal(adapter.normalizePriority('medium'), 'Medium');
+});
+
 // ── 시트 간 같은 TC 병합 ────────────────────────────────────────────────
 
 test('같은 TC 가 여러 시트에 있으면 envResults 병합 후 대표값 재계산', () => {
