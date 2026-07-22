@@ -485,6 +485,7 @@ async function renderConsolidated(id) {
   consolidatedData = data;
   consProjectId = id;
   consolidatedFilter = 'all'; consAxisFilter = null; consReasonFilter = null; consSearchQ = '';
+  Object.keys(consDetailCache).forEach(k => delete consDetailCache[k]); // 데이터 갱신 시 상세 캐시 무효화
 
   if (!data.sourceFiles || data.sourceFiles.length === 0) {
     container.innerHTML = `
@@ -723,7 +724,8 @@ function renderConsTable() {
       </tr></thead>
       <tbody>
         ${capped.map(r => `
-          <tr class="${r.mismatch ? 'row-mismatch' : ''}">
+          <tr class="cons-row ${r.mismatch ? 'row-mismatch' : ''}" data-tc="${escapeAttr(r.tcId)}" data-ex="${escapeAttr(r.exchange || '')}"
+              onclick="toggleConsDetail(this)" title="클릭하면 상세(스크린샷·영상)를 펼칩니다">
             <td class="tc-id">${escapeHtml(r.tcId)}</td>
             ${hasExch ? `<td>${escapeHtml(r.exchange || '')}</td>` : ''}
             ${sources.map(s => `<td>${cellHtml(r.sources[s])}</td>`).join('')}
@@ -732,6 +734,138 @@ function renderConsTable() {
           </tr>`).join('')}
       </tbody>
     </table>`;
+  wrap.dataset.cols = 3 + (hasExch ? 1 : 0) + sources.length; // 확장 패널 colspan
+}
+
+// ── 행 확장 패널 — TC 상세(스크린샷 썸네일·사유·영상/트레이스 딥링크) lazy 조회 ──
+const consDetailCache = {};
+
+async function toggleConsDetail(tr) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('cons-detail-tr')) { next.remove(); tr.classList.remove('expanded'); return; }
+  document.querySelectorAll('.cons-detail-tr').forEach(el => {
+    el.previousElementSibling?.classList.remove('expanded');
+    el.remove(); // 한 번에 하나만 펼침
+  });
+
+  const tcId = tr.dataset.tc, ex = tr.dataset.ex;
+  const cols = document.getElementById('consTableWrap')?.dataset.cols || 5;
+  const detailTr = document.createElement('tr');
+  detailTr.className = 'cons-detail-tr';
+  detailTr.innerHTML = `<td colspan="${cols}"><div class="tcd-panel">불러오는 중…</div></td>`;
+  tr.after(detailTr);
+  tr.classList.add('expanded');
+
+  const key = `${tcId}|${ex}`;
+  if (!consDetailCache[key]) {
+    consDetailCache[key] = await api(`/api/projects/${consProjectId}/tc-detail?tcId=${encodeURIComponent(tcId)}&exchange=${encodeURIComponent(ex)}`);
+  }
+  const d = consDetailCache[key];
+  const panel = detailTr.querySelector('.tcd-panel');
+  if (!d || d.error || !(d.records || []).length) { panel.textContent = (d && d.error) || '상세 정보가 없습니다.'; return; }
+
+  panel.innerHTML = d.records.map(rec => {
+    const envChips = (rec.envResults || []).map(e =>
+      `<span class="tcd-env">${escapeHtml(e.env)}: <b>${escapeHtml(e.result)}</b></span>`).join('');
+    const imgs = (rec.images || []).map((u, i) =>
+      `<img class="tcd-thumb" src="${escapeAttr(u)}" loading="lazy" title="클릭하면 확대 (휠 줌·드래그 이동)"
+         onclick='openLightbox(${JSON.stringify(rec.images)}, ${i})'>`).join('');
+    return `
+      <div class="tcd-item">
+        <div class="tcd-head">
+          <span class="src-badge src-${escapeAttr(rec.source)}">${escapeHtml(rec.source)}</span>
+          <span class="res-badge res-${String(rec.result).replace('/', '')}">${escapeHtml(rec.result)}</span>
+          ${rec.exchange ? `<span class="src-exch">${escapeHtml(rec.exchange)}</span>` : ''}
+          ${rec.env ? `<span class="src-meta">${escapeHtml(rec.env)}</span>` : ''}
+          ${rec.flaky ? '<span class="flaky" title="flaky">⚡</span>' : ''}
+          ${rec.title ? `<span class="tcd-title" title="${escapeAttr(rec.title)}">${escapeHtml(rec.title)}</span>` : ''}
+          ${rec.deepLink ? `<a class="btn btn-sm tcd-deep" href="${escapeAttr(rec.deepLink)}" target="_blank" onclick="event.stopPropagation()">🎬 영상·트레이스 보기 →</a>` : ''}
+        </div>
+        ${rec.reason ? `<div class="tcd-reason">${escapeHtml(rec.reason)}</div>` : ''}
+        ${envChips ? `<div class="tcd-envs">${envChips}</div>` : ''}
+        ${imgs ? `<div class="tcd-thumbs">${imgs}</div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+// ── 줌·팬 라이트박스 — 휠 줌(커서 기준)·드래그 이동·←/→ 넘기기·ESC 닫기 ──
+let lb = null; // { images, idx, scale, tx, ty, dragging, sx, sy }
+
+function openLightbox(images, idx) {
+  event?.stopPropagation();
+  lb = { images, idx: idx || 0, scale: 1, tx: 0, ty: 0, dragging: false };
+  let el = document.getElementById('lightbox');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'lightbox';
+    el.innerHTML = `
+      <div class="lb-toolbar">
+        <span class="lb-count" id="lbCount"></span>
+        <a class="btn btn-sm" id="lbOpenTab" target="_blank">↗ 새 탭에서 열기</a>
+        <button class="btn btn-sm" onclick="closeLightbox()">✕ 닫기 (ESC)</button>
+      </div>
+      <button class="lb-nav lb-prev" onclick="lbNav(-1)">‹</button>
+      <img id="lbImg" draggable="false">
+      <button class="lb-nav lb-next" onclick="lbNav(1)">›</button>`;
+    document.body.appendChild(el);
+    el.addEventListener('click', (e) => { if (e.target === el) closeLightbox(); });
+    el.addEventListener('wheel', lbWheel, { passive: false });
+    const img = el.querySelector('#lbImg');
+    img.addEventListener('mousedown', (e) => { lb.dragging = true; lb.sx = e.clientX - lb.tx; lb.sy = e.clientY - lb.ty; e.preventDefault(); });
+    window.addEventListener('mousemove', (e) => { if (lb && lb.dragging) { lb.tx = e.clientX - lb.sx; lb.ty = e.clientY - lb.sy; lbApply(); } });
+    window.addEventListener('mouseup', () => { if (lb) lb.dragging = false; });
+    img.addEventListener('dblclick', () => { lb.scale = 1; lb.tx = 0; lb.ty = 0; lbApply(); });
+  }
+  el.classList.add('open');
+  document.addEventListener('keydown', lbKeys);
+  lbShow();
+}
+
+function lbShow() {
+  const img = document.getElementById('lbImg');
+  img.src = lb.images[lb.idx];
+  lb.scale = 1; lb.tx = 0; lb.ty = 0;
+  lbApply();
+  document.getElementById('lbCount').textContent = lb.images.length > 1 ? `${lb.idx + 1} / ${lb.images.length}` : '';
+  document.getElementById('lbOpenTab').href = lb.images[lb.idx];
+  document.querySelectorAll('.lb-nav').forEach(b => b.style.display = lb.images.length > 1 ? '' : 'none');
+}
+
+function lbApply() {
+  const img = document.getElementById('lbImg');
+  if (img) img.style.transform = `translate(${lb.tx}px, ${lb.ty}px) scale(${lb.scale})`;
+}
+
+function lbWheel(e) {
+  e.preventDefault();
+  if (!lb) return;
+  const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+  const next = Math.min(8, Math.max(0.2, lb.scale * factor));
+  // 커서 기준 줌 — 커서가 가리키는 지점이 그대로 머물도록 이동량 보정
+  const cx = e.clientX - window.innerWidth / 2;
+  const cy = e.clientY - window.innerHeight / 2;
+  lb.tx = cx - (cx - lb.tx) * (next / lb.scale);
+  lb.ty = cy - (cy - lb.ty) * (next / lb.scale);
+  lb.scale = next;
+  lbApply();
+}
+
+function lbNav(d) {
+  event?.stopPropagation();
+  lb.idx = (lb.idx + d + lb.images.length) % lb.images.length;
+  lbShow();
+}
+
+function lbKeys(e) {
+  if (e.key === 'Escape') closeLightbox();
+  else if (e.key === 'ArrowLeft' && lb && lb.images.length > 1) lbNav(-1);
+  else if (e.key === 'ArrowRight' && lb && lb.images.length > 1) lbNav(1);
+}
+
+function closeLightbox() {
+  document.getElementById('lightbox')?.classList.remove('open');
+  document.removeEventListener('keydown', lbKeys);
+  lb = null;
 }
 
 function firstReason(r) {

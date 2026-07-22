@@ -899,6 +899,35 @@ app.get('/api/projects/:id/consolidated', (req, res) => {
   res.json({ ...result, sourceFiles: sources, pinnedWidgets: project.pinnedWidgets || [] });
 });
 
+// 취합 행 상세 — 특정 TC 의 원본 레코드(스크린샷·영상 딥링크 포함). pivot 행 확장 패널이 lazy 조회.
+app.get('/api/projects/:id/tc-detail', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  const tcId = String(req.query.tcId || '').trim();
+  if (!tcId) return res.status(400).json({ error: 'tcId 가 필요합니다.' });
+  const exchange = String(req.query.exchange || '').trim() || null;
+
+  // 업로드 경로는 공백·대괄호 포함 — URL 안전하게 인코딩(# 은 딥링크 fragment 와 충돌 방지)
+  const urlPath = p => encodeURI(p).replace(/\[/g, '%5B').replace(/\]/g, '%5D').replace(/#/g, '%23');
+
+  const records = db.records
+    .filter(r => r.projectId === project.id && r.tcId === tcId &&
+      (!exchange || !r.exchange || r.exchange === exchange)) // 거래소 없는 레코드(매뉴얼)는 항상 포함 — 취합 조인과 동일 규칙
+    .map(r => ({
+      source: r.source, result: r.result, exchange: r.exchange || null, env: r.env || null,
+      envResults: r.envResults || null, reason: r.reasonNote || null, naReason: r.naReason || null,
+      title: r.title || null, suite: r.suite || null, sheet: r.sheet || null, flaky: !!r.flaky,
+      deepLink: (r.testId && r.reportDirRel)
+        ? `${urlPath(`/uploads/${r.reportDirRel}/index.html`)}#?testId=${encodeURIComponent(r.testId)}`
+        : null,
+      images: (r.attachments || [])
+        .filter(a => a.path && /^image\//.test(a.contentType || '') && a.exists !== false && r.reportDirRel)
+        .map(a => urlPath(`/uploads/${r.reportDirRel}/${a.path}`)),
+    }));
+  res.json({ tcId, exchange, records });
+});
+
 // 취합 대시보드 위젯 고정/해제 — project.pinnedWidgets (프로젝트 스코프, 전체 열람자 공유)
 const CONS_WIDGET_KEYS = ['exchangeStats'];
 
