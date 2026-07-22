@@ -7,6 +7,7 @@ let selectedFiles = [];
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
   setupUploadZone();
+  setupSourceZone();
   initSidebarResize();
   initQaLauncher();
 
@@ -410,8 +411,389 @@ async function showProjectView(id) {
       ).join('');
   }
 
-  const grouped = await api(`/api/projects/${id}/reports`);
-  renderDateGroups(grouped);
+  // 유형 분기 (§4): 결과형 = 취합 대시보드, 문서형 = 리포트 목록(현행)
+  const isResult = project && project.type === 'result';
+  // 결과형에서도 리포트 업로드(파일 탭) 사용 가능 — 서버가 Playwright ZIP을 자동 감지해 취합 소스로 등록
+  document.getElementById('btnUploadReport').style.display = '';
+  document.getElementById('btnUploadSource').style.display = isResult ? '' : 'none';
+  document.getElementById('btnRefreshConsolidated').style.display = isResult ? '' : 'none';
+  document.getElementById('dateGroups').style.display = isResult ? 'none' : '';
+  document.getElementById('consolidatedView').style.display = isResult ? '' : 'none';
+
+  if (isResult) {
+    await renderConsolidated(id);
+  } else {
+    const grouped = await api(`/api/projects/${id}/reports`);
+    renderDateGroups(grouped);
+    renderConvertBanner(grouped);
+  }
+}
+
+// 문서형 프로젝트에 Playwright 리포트가 있으면 결과형 전환 제안 배너 표시
+function renderConvertBanner(grouped) {
+  const all = Object.values(grouped || {}).flat();
+  if (!all.some(r => r.playwright)) return;
+  document.getElementById('dateGroups').insertAdjacentHTML('afterbegin', `
+    <div class="pw-convert-banner">
+      <div class="pw-convert-text">🤖 <b>Playwright 리포트가 감지되었습니다.</b><br>
+        결과형으로 전환하면 업로드된 리포트가 취합 소스로 자동 등록되고, TC ID 기준 취합 대시보드(통계·거래소축·Fail 인사이트·AI 분석)를 볼 수 있어요.</div>
+      <button class="btn btn-primary" onclick="convertToResult()">결과형으로 전환하기</button>
+    </div>`);
+}
+
+async function convertToResult() {
+  if (!currentProjectId) return;
+  const msg = '이 프로젝트를 결과형으로 전환할까요?\n\n'
+    + '· Playwright 리포트 → 취합 소스로 자동 등록 (재업로드 불필요)\n'
+    + '· 그 외 문서형 리포트(HTML/Sheets/다이어그램)는 결과형 화면에서 표시되지 않습니다 (데이터는 보존)\n'
+    + '· 전환 후 문서형으로 되돌리기는 지원되지 않습니다';
+  if (!confirm(msg)) return;
+
+  showLoadingOverlay('결과형으로 전환하고 있습니다...');
+  const d = await api(`/api/projects/${currentProjectId}/convert-to-result`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  hideLoadingOverlay();
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '전환 실패'), 'error'); return; }
+
+  const rows = (d.sources || []).reduce((a, s) => a + (s.rowCount || 0), 0);
+  showToast(`✅ 결과형 전환 완료 — 소스 ${(d.sources || []).length}개 · ${rows}행 취합`, 'success');
+  (d.skipped || []).forEach(s => showToast(`⚠️ ${s.file}: ${s.reason}`, 'error'));
+  await loadProjects();
+  showProjectView(currentProjectId);
+}
+
+// ===== 결과 취합 대시보드 (결과형 프로젝트) =====
+let consolidatedData = null;
+let consolidatedFilter = 'all';
+
+// 대시보드 구성: 스펙 §9.3 (2026-07-21 개정) ① 요약 밴드 → ② 축별 분포 → ③ Fail 사유 패턴
+// → ④ 소스 파일(접힘) → ⑤ pivot 표(스크롤) → ⑥ AI(Fail 분석 + Q&A).
+// 기존 단건 대시보드의 dash-*/detail-*/ai-* 문법 재사용. 필터 클릭은 축·칩·표만 부분 렌더
+// (전체 재렌더 시 AI 대화가 초기화되므로).
+let consAxisFilter = null;   // { key: 'exchange'|'suite'|'source', value }
+let consReasonFilter = null; // failReasons 인덱스
+let consSearchQ = '';
+let consProjectId = null;
+
+async function renderConsolidated(id) {
+  const container = document.getElementById('consolidatedView');
+  container.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>취합 계산 중…</p></div>';
+  const data = await api(`/api/projects/${id}/consolidated`);
+  if (data.error) { container.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error)}</p></div>`; return; }
+  consolidatedData = data;
+  consProjectId = id;
+  consolidatedFilter = 'all'; consAxisFilter = null; consReasonFilter = null; consSearchQ = '';
+
+  if (!data.sourceFiles || data.sourceFiles.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📊</div>
+        <h3>취합할 결과 소스가 없습니다</h3>
+        <p>Playwright 리포트 ZIP을 업로드하면 TC ID 기준으로 취합됩니다.</p>
+        <button class="btn btn-primary" onclick="openSourceModal()">📊 결과 소스 업로드</button>
+      </div>`;
+    return;
+  }
+  renderConsolidatedBody();
+}
+
+function renderConsolidatedBody() {
+  const container = document.getElementById('consolidatedView');
+  const data = consolidatedData;
+  const s = data.stats;
+  const multi = data.sources.length >= 2; // 불일치·커버리지는 소스 2종 이상일 때만 의미 있음
+
+  // ① 요약 밴드 — Pass Rate·실행률 게이지 + 카운트 (모수: 전체 = 실행(P+F) + N/T)
+  const execRate = s.totalTc ? Math.round((s.executed / s.totalTc) * 100) : 0;
+  const rateColor = s.passRate >= 90 ? '#22c55e' : s.passRate >= 70 ? '#f59e0b' : '#ef4444';
+  const execColor = execRate >= 80 ? '#22c55e' : execRate >= 50 ? '#f59e0b' : '#6b7280';
+  const covPairs = Object.entries(s.coverage || {});
+  const summary = `
+    <div class="dash-panel cons-summary">
+      <div class="dash-summary">
+        <div class="dash-rate">
+          <div class="dash-rate-circle" style="--rate:${s.passRate}; --color:${rateColor}"><span class="dash-rate-value">${s.passRate}%</span></div>
+          <div class="dash-rate-label">Pass Rate (${s.byFinal.Pass}/${s.executed})</div>
+        </div>
+        <div class="dash-rate">
+          <div class="dash-rate-circle" style="--rate:${execRate}; --color:${execColor}"><span class="dash-rate-value">${execRate}%</span></div>
+          <div class="dash-rate-label">실행률 (${s.executed}/${s.totalTc})</div>
+        </div>
+        <div class="dash-counts">
+          <div class="dash-count pass"><span class="dash-count-value">${s.byFinal.Pass}</span><span class="dash-count-label">Pass</span></div>
+          <div class="dash-count fail"><span class="dash-count-value">${s.byFinal.Fail}</span><span class="dash-count-label">Fail</span></div>
+          <div class="dash-count skip"><span class="dash-count-value">${s.byFinal['N/T']}</span><span class="dash-count-label">N/T</span></div>
+          ${s.byFinal.Blocked ? `<div class="dash-count na"><span class="dash-count-value">${s.byFinal.Blocked}</span><span class="dash-count-label">Blocked</span></div>` : ''}
+          <div class="dash-count total" title="Pass + Fail + N/T"><span class="dash-count-value">${s.totalTc}</span><span class="dash-count-label">전체 TC</span></div>
+          ${multi ? `<div class="dash-count ${s.mismatch ? 'fail' : ''}" title="소스 간 결과 불일치"><span class="dash-count-value">${s.mismatch}</span><span class="dash-count-label">불일치</span></div>` : ''}
+          ${multi ? covPairs.map(([src, v]) => `<div class="dash-count"><span class="dash-count-value">${v}%</span><span class="dash-count-label">${escapeHtml(src)} 커버리지</span></div>`).join('') : ''}
+        </div>
+      </div>
+    </div>`;
+
+  // ④ 소스 파일 — 접힌 요약 한 줄, 펼치면 관리 목록
+  const files = data.sourceFiles;
+  const lastImported = files.reduce((m, f) => (f.importedAt > m ? f.importedAt : m), '');
+  const roles = [...new Set(files.map(f => f.sourceRole))].join(' · ');
+  const sourcesSection = `
+    <div class="cons-sources">
+      <button type="button" class="cons-sources-head" onclick="toggleConsSources()">
+        <span>소스 파일 ${files.length}개 · ${escapeHtml(roles)}${lastImported ? ` · 마지막 취합 ${formatTime(lastImported)}` : ''}</span>
+        <span class="fail-caret" id="consSourcesCaret">▸ 펼쳐보기</span>
+      </button>
+      <div class="cons-sources-body hidden" id="consSourcesBody">
+        ${files.map(f => `
+          <div class="cons-source-item">
+            <span class="src-badge src-${escapeAttr(f.sourceRole)}">${escapeHtml(f.sourceRole)}</span>
+            <span class="src-name">${escapeHtml(f.filename)}</span>
+            ${f.exchange ? `<span class="src-exch">${escapeHtml(f.exchange)}</span>` : ''}
+            <span class="src-meta">${f.rowCount} TC · ${f.snapshot ? escapeHtml(f.snapshot) + ' · ' : ''}${formatTime(f.importedAt)}</span>
+            ${f.folderId ? `<button class="btn-icon-sm" title="원본 리포트 열기" onclick="openReportDirect('/uploads/${escapeAttr(f.indexPath)}')">↗</button>` : ''}
+            <button class="btn-icon-sm danger" title="소스 삭제" onclick="deleteSource('${f.id}')">🗑</button>
+          </div>`).join('')}
+      </div>
+    </div>`;
+
+  // ⑥ AI — Fail 분석(자동) + Q&A. 기존 ai-*/fail-analysis 컴포넌트를 cons-<projectId> id로 재사용.
+  const aiOn = typeof QA_CONFIG !== 'undefined' && QA_CONFIG && QA_CONFIG.aiEnabled;
+  const aiId = 'cons-' + consProjectId;
+  const aiSection = aiOn ? `
+    <div class="dash-panel cons-ai">
+      ${s.byFinal.Fail > 0 ? `<div class="dash-section fail-analysis" id="fail-analysis-${aiId}"></div>` : ''}
+      ${renderAiSection(aiId)}
+    </div>` : '';
+
+  // 축/사유/필터/표는 부분 렌더 대상 — 컨테이너만 만들어 두고 아래에서 채움
+  container.innerHTML = summary
+    + '<div id="consAxesBox"></div><div id="consPinnedBox"></div><div id="consReasonsBox"></div>'
+    + sourcesSection
+    + '<div id="consFiltersBox"></div><div class="cons-table-wrap" id="consTableWrap"></div>'
+    + aiSection;
+  renderConsAxes();
+  renderConsPinned();
+  renderConsFilters();
+  renderConsTable();
+  if (aiOn && s.byFinal.Fail > 0) loadFailAnalysis(aiId);
+}
+
+// ②③ 축별 분포 + Fail 사유 패턴 — 필터 상태(active) 반영을 위해 부분 렌더
+function renderConsAxes() {
+  const data = consolidatedData;
+  const axesBox = document.getElementById('consAxesBox');
+  const reasonsBox = document.getElementById('consReasonsBox');
+  if (!axesBox || !reasonsBox) return;
+
+  const axesGroups = (data.axes || []).map(ax => {
+    const rows = ax.values.map(v => consStackRow(ax.key, v)).join('');
+    return rows ? `<div class="detail-group"><div class="dash-section-title">${escapeHtml(ax.name)}</div>${rows}</div>` : '';
+  }).join('');
+  axesBox.innerHTML = axesGroups ? `
+    <div class="dash-panel cons-axes">
+      <div class="detail-legend">
+        <span class="legend-item"><i class="legend-dot seg-pass"></i>Pass</span>
+        <span class="legend-item"><i class="legend-dot seg-fail"></i>Fail</span>
+        <span class="legend-item"><i class="legend-dot seg-nt"></i>N/T</span>
+        <span class="legend-item"><i class="legend-dot seg-na"></i>결과 없음</span>
+      </div>
+      ${axesGroups}
+    </div>` : '';
+
+  const reasons = data.failReasons || [];
+  const maxReason = reasons.length ? reasons[0].count : 1;
+  reasonsBox.innerHTML = reasons.length ? `
+    <div class="dash-panel cons-reasons">
+      <div class="dash-section-title">❌ Fail 사유 패턴 (상위 ${reasons.length})</div>
+      ${reasons.map((g, i) => `
+        <div class="detail-row cons-click-row ${consReasonFilter === i ? 'active' : ''}" onclick="setConsReasonFilter(${i})" title="클릭하면 해당 TC만 아래 표에 표시">
+          <span class="detail-row-label cons-reason-label" title="${escapeAttr(g.pattern)}">${escapeHtml(g.pattern)}</span>
+          <div class="detail-stack"><div class="stack-seg seg-fail" style="width:${((g.count / maxReason) * 100).toFixed(1)}%"></div></div>
+          <span class="detail-row-counts">${g.count}건</span>
+        </div>`).join('')}
+    </div>` : '';
+}
+
+// ⑤ 필터 버튼 + 검색 + 해제 칩 — 부분 렌더
+function renderConsFilters() {
+  const box = document.getElementById('consFiltersBox');
+  if (!box) return;
+  const data = consolidatedData;
+  const multi = data.sources.length >= 2;
+  const reasons = data.failReasons || [];
+  const chips = [];
+  if (consAxisFilter) chips.push(`<span class="cons-chip" onclick="setConsAxisFilter('${escapeAttr(consAxisFilter.key)}','${escapeAttr(consAxisFilter.value)}')" title="필터 해제">${escapeHtml(consAxisFilter.value)} ✕</span>`);
+  if (consReasonFilter !== null && reasons[consReasonFilter]) chips.push(`<span class="cons-chip" onclick="setConsReasonFilter(${consReasonFilter})" title="필터 해제">${escapeHtml(reasons[consReasonFilter].pattern)} ✕</span>`);
+  const filterKeys = multi ? [['all','전체'],['fail','Fail'],['mismatch','불일치'],['nt','N/T']] : [['all','전체'],['fail','Fail'],['nt','N/T']];
+  box.innerHTML = `
+    <div class="cons-filters">
+      ${filterKeys.map(([k,label]) =>
+        `<button class="cons-filter ${consolidatedFilter===k?'active':''}" onclick="setConsFilter('${k}')">${label}</button>`).join('')}
+      <input type="text" class="cons-search" id="consSearch" placeholder="TC ID 검색…" value="${escapeAttr(consSearchQ)}" oninput="consSearchQ=this.value; renderConsTable()">
+      ${chips.join('')}
+      ${data.untagged.count ? `<span class="cons-untagged" title="TC ID 없는 테스트(setup/teardown/미태그)">미태그 ${data.untagged.count}건</span>` : ''}
+    </div>`;
+}
+
+// 축별 분포 스택 바 한 줄 (기존 renderStackRow와 동일 문법 + 클릭 필터)
+function consStackRow(axKey, v) {
+  const denom = v.total + (v.na || 0);
+  if (!denom) return '';
+  const seg = (n, cls, title) => n ? `<div class="stack-seg ${cls}" style="width:${((n / denom) * 100).toFixed(1)}%" title="${title} ${n}건"></div>` : '';
+  const counts = [
+    v.pass ? `P ${v.pass}` : '',
+    v.fail ? `F ${v.fail}` : '',
+    v.nt ? `N/T ${v.nt}` : '',
+    v.na ? `없음 ${v.na}` : '',
+  ].filter(Boolean).join(' · ');
+  const active = consAxisFilter && consAxisFilter.key === axKey && consAxisFilter.value === v.value;
+  const clickable = !/^기타 \(/.test(String(v.value)); // suite '기타' 합산 행은 필터 불가
+  return `
+    <div class="detail-row ${clickable ? 'cons-click-row' : ''} ${active ? 'active' : ''}"
+         ${clickable ? `onclick="setConsAxisFilter('${escapeAttr(axKey)}','${escapeAttr(v.value)}')" title="클릭하면 아래 표를 필터링합니다"` : ''}>
+      <span class="detail-row-label" title="${escapeAttr(v.value)}">${escapeHtml(v.value)}</span>
+      <div class="detail-stack">${seg(v.pass,'seg-pass','Pass')}${seg(v.fail,'seg-fail','Fail')}${seg(v.nt,'seg-nt','N/T')}${seg(v.na,'seg-na','결과 없음')}</div>
+      <span class="detail-row-counts">${counts}</span>
+    </div>`;
+}
+
+function setConsFilter(k) { consolidatedFilter = k; document.querySelectorAll('.cons-filter').forEach(b => b.classList.remove('active')); event.target.classList.add('active'); renderConsTable(); }
+
+function setConsAxisFilter(key, value) {
+  consAxisFilter = (consAxisFilter && consAxisFilter.key === key && consAxisFilter.value === value) ? null : { key, value };
+  renderConsAxes(); renderConsFilters(); renderConsTable();
+}
+
+function setConsReasonFilter(i) {
+  consReasonFilter = consReasonFilter === i ? null : i;
+  renderConsAxes(); renderConsFilters(); renderConsTable();
+}
+
+function toggleConsSources() {
+  const body = document.getElementById('consSourcesBody');
+  const caret = document.getElementById('consSourcesCaret');
+  if (!body) return;
+  body.classList.toggle('hidden');
+  if (caret) caret.textContent = body.classList.contains('hidden') ? '▸ 펼쳐보기' : '▾ 접기';
+}
+
+function renderConsTable() {
+  if (!consolidatedData) return;
+  const wrap = document.getElementById('consTableWrap');
+  const q = (document.getElementById('consSearch')?.value || '').trim().toUpperCase();
+  const sources = consolidatedData.sources;
+  let rows = consolidatedData.rows;
+  if (consolidatedFilter === 'fail') rows = rows.filter(r => r.final === 'Fail');
+  else if (consolidatedFilter === 'mismatch') rows = rows.filter(r => r.mismatch);
+  else if (consolidatedFilter === 'nt') rows = rows.filter(r => r.final === 'N/T');
+  if (consAxisFilter) {
+    const { key, value } = consAxisFilter;
+    if (key === 'exchange') rows = rows.filter(r => r.exchange === value);
+    else if (key === 'suite') rows = rows.filter(r => r.suite === value);
+    else if (key === 'source') rows = rows.filter(r => r.sources[value]);
+  }
+  if (consReasonFilter !== null && consolidatedData.failReasons && consolidatedData.failReasons[consReasonFilter]) {
+    const keys = new Set(consolidatedData.failReasons[consReasonFilter].keys);
+    rows = rows.filter(r => keys.has(`${r.tcId} ${r.exchange || ''}`));
+  }
+  if (q) rows = rows.filter(r => r.tcId.toUpperCase().includes(q));
+
+  const hasExch = consolidatedData.rows.some(r => r.exchange);
+  const badge = (v) => `<span class="res-badge res-${v.replace('/','')}">${v}</span>`;
+  const capped = rows.slice(0, 1000);
+
+  wrap.innerHTML = `
+    <div class="cons-count">${rows.length}행${rows.length > capped.length ? ` (상위 ${capped.length}만 표시)` : ''}</div>
+    <table class="cons-table">
+      <thead><tr>
+        <th>TC ID</th>${hasExch ? '<th>거래소</th>' : ''}
+        ${sources.map(s => `<th>${escapeHtml(s)}</th>`).join('')}
+        <th>최종</th><th>사유</th>
+      </tr></thead>
+      <tbody>
+        ${capped.map(r => `
+          <tr class="${r.mismatch ? 'row-mismatch' : ''}">
+            <td class="tc-id">${escapeHtml(r.tcId)}</td>
+            ${hasExch ? `<td>${escapeHtml(r.exchange || '')}</td>` : ''}
+            ${sources.map(s => `<td>${r.sources[s] ? badge(r.sources[s].result) + (r.sources[s].flaky ? ' <span class="flaky" title="flaky">⚡</span>' : '') : '<span class="res-empty">–</span>'}</td>`).join('')}
+            <td>${badge(r.final)}${r.mismatch ? ' <span class="mismatch-tag" title="소스 간 결과 불일치">⚠</span>' : ''}</td>
+            <td class="reason">${escapeHtml(firstReason(r) || '')}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+}
+
+function firstReason(r) {
+  for (const s of Object.values(r.sources)) { if (s.reason) return s.reason; }
+  return null;
+}
+
+// ===== 결과 소스 업로드 =====
+let selectedSourceFiles = [];
+
+function setupSourceZone() {
+  const zone = document.getElementById('sourceZone');
+  const input = document.getElementById('sourceFileInput');
+  if (!zone || !input) return;
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    addSourceFiles(Array.from(e.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.zip')));
+  });
+  input.addEventListener('change', () => { addSourceFiles(Array.from(input.files)); input.value = ''; });
+}
+
+function openSourceModal() {
+  selectedSourceFiles = [];
+  renderSourceFileList();
+  document.getElementById('sourceSnapshot').value = '';
+  openModal('sourceModal');
+}
+
+function addSourceFiles(files) { selectedSourceFiles = [...selectedSourceFiles, ...files]; renderSourceFileList(); }
+function removeSourceFile(i) { selectedSourceFiles.splice(i, 1); renderSourceFileList(); }
+function renderSourceFileList() {
+  document.getElementById('sourceFileList').innerHTML = selectedSourceFiles.map((f, i) => `
+    <div class="upload-file-item"><span>📊</span><span class="file-name">${escapeHtml(f.name)}</span>
+    <button class="file-remove" onclick="removeSourceFile(${i})">✕</button></div>`).join('');
+}
+
+async function uploadSources() {
+  if (!currentProjectId || selectedSourceFiles.length === 0) { showToast('ZIP 파일을 선택하세요.', 'error'); return; }
+  showLoadingOverlay('결과를 취합하고 있습니다…');
+  const formData = new FormData();
+  for (const f of selectedSourceFiles) formData.append('files', f);
+  formData.append('snapshot', document.getElementById('sourceSnapshot').value.trim());
+  formData.append('sourceRole', 'automation');
+  const uploaderName = (document.getElementById('uploaderName')?.value || '').trim() || '익명';
+  formData.append('uploadedBy', uploaderName);
+  try {
+    const res = await fetch(`/api/projects/${currentProjectId}/sources`, { method: 'POST', body: formData });
+    const data = await res.json();
+    hideLoadingOverlay();
+    if (data.error) { showToast('❌ ' + data.error, 'error'); return; }
+    closeModal('sourceModal');
+    const added = (data.sources || []).length, skipped = (data.skipped || []).length;
+    showToast(`✅ 소스 ${added}건 취합${skipped ? ` · ${skipped}건 제외` : ''}`, 'success');
+    if (skipped) console.warn('취합 제외:', data.skipped);
+    await loadProjects();
+    renderConsolidated(currentProjectId);
+  } catch (e) {
+    hideLoadingOverlay();
+    showToast('❌ 취합 실패: ' + e.message, 'error');
+  }
+}
+
+async function deleteSource(id) {
+  if (!confirm('이 소스와 취합된 결과를 삭제하시겠습니까?')) return;
+  const res = await api(`/api/sources/${id}`, { method: 'DELETE' });
+  if (res.error) { showToast('❌ ' + res.error, 'error'); return; }
+  showToast('✅ 소스 삭제됨', 'success');
+  await loadProjects();
+  renderConsolidated(currentProjectId);
 }
 
 function startEditProjectName(projectId, el) {
@@ -818,16 +1200,28 @@ async function uploadFiles() {
   localStorage.setItem('uploaderName', uploaderName);
 
   try {
-    await fetch(`/api/projects/${currentProjectId}/reports`, {
+    const res = await fetch(`/api/projects/${currentProjectId}/reports`, {
       method: 'POST',
       body: formData
     });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.error) throw new Error(d.error || `업로드 실패 (${res.status})`);
 
     selectedFiles = [];
     renderFileList();
     closeModal('uploadModal');
     hideLoadingOverlay();
-    showToast('✅ 업로드 완료', 'success');
+    if (d.consolidated) {
+      // 결과형 프로젝트 — Playwright ZIP 자동 감지·취합 결과 안내
+      const n = (d.sources || []).length;
+      const rowSum = (d.sources || []).reduce((a, s) => a + (s.rowCount || 0), 0);
+      if (n) showToast(`✅ 취합 완료 — 소스 ${n}개 · ${rowSum}행 반영`, 'success');
+      (d.skipped || []).forEach(s => showToast(`⚠️ ${s.file}: ${s.reason}`, 'error'));
+      if (!n && !(d.skipped || []).length) showToast('업로드된 파일이 없습니다', 'error');
+    } else {
+      showToast('✅ 업로드 완료', 'success');
+      (d.notices || []).forEach(m => showToast('💡 ' + m, 'info'));
+    }
     await loadProjects();
     showProjectView(currentProjectId);
   } catch (e) {
@@ -1062,6 +1456,13 @@ function renderDetailPanel(d) {
 
 // ===== Fail 분석 및 결함 후보 (자동 생성 — Fail 있을 때만) =====
 
+// AI 엔드포인트 — 단건 리포트와 취합 뷰(cons-<projectId>)가 같은 UI 를 공유
+function aiEndpoint(id, kind) { // kind: 'chat' | 'fail-analysis'
+  return id.startsWith('cons-')
+    ? `/api/projects/${id.slice(5)}/consolidated/${kind}`
+    : `/api/reports/${id}/${kind}`;
+}
+
 async function loadFailAnalysis(reportId, force) {
   const el = document.getElementById(`fail-analysis-${reportId}`);
   if (!el) return;
@@ -1069,7 +1470,7 @@ async function loadFailAnalysis(reportId, force) {
     <div class="dash-section-title">🔬 Fail 분석 및 결함 후보</div>
     <div class="fa-loading"><div class="loading-spinner-sm"></div> 결함 패턴 분석 중… ${force ? '' : '(첫 분석은 10초 정도 걸립니다)'}</div>`;
   try {
-    const d = await api(`/api/reports/${reportId}/fail-analysis${force ? '?force=1' : ''}`);
+    const d = await api(`${aiEndpoint(reportId, 'fail-analysis')}${force ? '?force=1' : ''}`);
     if (!d || d.disabled || d.none) { el.innerHTML = ''; return; }
     if (d.error) {
       el.innerHTML = `
@@ -1117,9 +1518,13 @@ const AI_PRESET_QUESTIONS = [
 ];
 
 function renderAiSection(reportId) {
+  // 취합 뷰(cons-*) 전용 칩 — AI 호출 없이 프론트가 거래소별 위젯을 직접 렌더
+  const consChips = String(reportId).startsWith('cons-')
+    ? `<button type="button" class="ai-chip" onclick="showExchangeStats('${reportId}')">거래소별 결과 통계</button>`
+    : '';
   const chips = AI_PRESET_QUESTIONS.map(p =>
     `<button type="button" class="ai-chip" data-q="${escapeAttr(p.q)}" onclick="sendAiQuestion('${reportId}', this.dataset.q)">${escapeHtml(p.label)}</button>`
-  ).join('');
+  ).join('') + consChips;
   return `
     <div class="dash-section ai-section">
       <button type="button" class="ai-toggle" onclick="toggleAiPanel('${reportId}')">
@@ -1131,11 +1536,123 @@ function renderAiSection(reportId) {
         <div class="ai-input-row">
           <input type="text" id="ai-input-${reportId}" class="ai-input" maxlength="1000"
             placeholder="이 결과서에 대해 질문하세요... (예: IMPLEMENTED 중 Pass 비율은?)"
-            onkeydown="if(event.key==='Enter'){sendAiQuestion('${reportId}');}">
+            onkeydown="if(event.key==='Enter'&&!event.isComposing&&event.keyCode!==229){sendAiQuestion('${reportId}');}">
           <button type="button" class="btn btn-primary btn-sm" id="ai-send-${reportId}" onclick="sendAiQuestion('${reportId}')">전송</button>
         </div>
       </div>
     </div>`;
+}
+
+// 거래소별 결과 통계 카드 HTML — 채팅 위젯·고정 섹션 공용 (consolidatedData.rows 집계, AI 미호출)
+function buildExchangeCards() {
+  if (!consolidatedData || !consolidatedData.rows) return '';
+  const groups = {};
+  for (const r of consolidatedData.rows) {
+    const ex = r.exchange || '미지정';
+    const g = groups[ex] = groups[ex] || { pass: 0, fail: 0, nt: 0, blocked: 0, suites: {} };
+    if (r.final === 'Pass') g.pass++;
+    else if (r.final === 'Fail') g.fail++;
+    else if (r.final === 'Blocked') g.blocked++;
+    else g.nt++;
+    const suName = r.suite || '기타';
+    const su = g.suites[suName] = g.suites[suName] || { pass: 0, fail: 0, nt: 0 };
+    if (r.final === 'Pass') su.pass++;
+    else if (r.final === 'Fail' || r.final === 'Blocked') su.fail++;
+    else su.nt++;
+  }
+  const names = Object.keys(groups).sort();
+  if (!names.length) return '';
+
+  return names.map(name => {
+    const g = groups[name];
+    const executed = g.pass + g.fail + g.blocked;
+    const total = executed + g.nt;
+    const rate = executed ? Math.round((g.pass / executed) * 100) : 0;
+    const color = rate >= 90 ? '#22c55e' : rate >= 70 ? '#f59e0b' : '#ef4444';
+    const suites = Object.entries(g.suites)
+      .map(([s, v]) => ({ s, ...v, total: v.pass + v.fail + v.nt }))
+      .sort((a, b) => b.total - a.total).slice(0, 6);
+    const suiteRows = suites.map(v => {
+      const seg = (n, cls, t) => n ? `<div class="stack-seg ${cls}" style="width:${((n / v.total) * 100).toFixed(1)}%" title="${t} ${n}건"></div>` : '';
+      return `
+        <div class="exch-suite-row">
+          <span class="exch-suite-label" title="${escapeAttr(v.s)}">${escapeHtml(String(v.s).split('/').pop())}</span>
+          <div class="detail-stack">${seg(v.pass, 'seg-pass', 'Pass')}${seg(v.fail, 'seg-fail', 'Fail')}${seg(v.nt, 'seg-nt', 'N/T')}</div>
+          <span class="exch-suite-counts">${v.pass}/${v.total}</span>
+        </div>`;
+    }).join('');
+    return `
+      <div class="exch-card">
+        <div class="exch-card-head">${escapeHtml(name)}</div>
+        <div class="exch-card-gauge">
+          <div class="dash-rate-circle exch-gauge" style="--rate:${rate}; --color:${color}"><span class="dash-rate-value">${rate}%</span></div>
+          <div class="exch-card-counts">
+            <span class="res-badge res-Pass">P ${g.pass}</span>
+            <span class="res-badge res-Fail">F ${g.fail + g.blocked}</span>
+            <span class="res-badge res-NT">N/T ${g.nt}</span>
+            <span class="exch-total">전체 ${total} · Pass율 ${rate}% (${g.pass}/${executed})</span>
+          </div>
+        </div>
+        ${suiteRows ? `<div class="exch-suites">${suiteRows}</div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+// '거래소별 결과 통계' 칩 — 채팅 영역에 위젯 말풍선 렌더 + 📌 고정 버튼
+function showExchangeStats(reportId) {
+  const cards = buildExchangeCards();
+  if (!cards) { appendAiBubble(reportId, 'assistant', '거래소 정보가 있는 결과가 없습니다.'); return; }
+  appendAiBubble(reportId, 'user', '거래소별 결과 통계');
+  const pinned = (consolidatedData.pinnedWidgets || []).includes('exchangeStats');
+  const pinBtn = pinned
+    ? `<button type="button" class="ai-pin" disabled>✅ 고정됨</button>`
+    : `<button type="button" class="ai-pin" onclick="pinConsWidget('exchangeStats', this)">📌 대시보드에 고정</button>`;
+  appendAiBubble(reportId, 'assistant', `<div class="exch-cards">${cards}</div><div class="exch-pin-row">${pinBtn}</div>`);
+}
+
+// 위젯 고정/해제 — project.pinnedWidgets (서버 저장, 프로젝트 열람자 공유)
+async function pinConsWidget(key, btn) {
+  if (!consProjectId) return;
+  if (btn) btn.disabled = true;
+  const d = await api(`/api/projects/${consProjectId}/widgets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key }),
+  });
+  if (!d || d.error) {
+    if (btn) btn.disabled = false;
+    showToast('❌ ' + ((d && d.error) || '고정 실패'), 'error');
+    return;
+  }
+  consolidatedData.pinnedWidgets = d.pinnedWidgets;
+  if (btn) btn.textContent = '✅ 고정됨';
+  showToast('📌 대시보드에 고정되었습니다', 'success');
+  renderConsPinned();
+}
+
+async function unpinConsWidget(key) {
+  if (!consProjectId) return;
+  if (!confirm('고정된 위젯을 해제할까요?')) return;
+  const d = await api(`/api/projects/${consProjectId}/widgets/${key}`, { method: 'DELETE' });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '해제 실패'), 'error'); return; }
+  consolidatedData.pinnedWidgets = d.pinnedWidgets;
+  renderConsPinned();
+}
+
+// 고정된 위젯 섹션 — 부분 렌더 (AI 대화 DOM 보존을 위해 전체 재렌더 금지)
+function renderConsPinned() {
+  const box = document.getElementById('consPinnedBox');
+  if (!box || !consolidatedData) return;
+  const pinned = consolidatedData.pinnedWidgets || [];
+  if (!pinned.includes('exchangeStats')) { box.innerHTML = ''; return; }
+  const cards = buildExchangeCards();
+  box.innerHTML = cards ? `
+    <div class="dash-panel cons-pinned">
+      <div class="dash-section-title exch-pinned-head">📌 거래소별 결과 통계
+        <button type="button" class="btn-icon-sm" title="고정 해제" onclick="unpinConsWidget('exchangeStats')">✕</button>
+      </div>
+      <div class="exch-cards">${cards}</div>
+    </div>` : '';
 }
 
 function toggleAiPanel(reportId) {
@@ -1191,7 +1708,7 @@ async function sendAiQuestion(reportId, preset) {
 
   let assistantText = '';
   try {
-    const resp = await fetch(`/api/reports/${reportId}/chat`, {
+    const resp = await fetch(aiEndpoint(reportId, 'chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: st.messages }),
@@ -1247,7 +1764,7 @@ function attachAiMetric(reportId, bubble, data) {
   badge.innerHTML = `
     <span class="ai-metric-value">${escapeHtml(data.computed.display)}</span>
     <span class="ai-metric-label">${escapeHtml(data.definition.label)}</span>
-    <button type="button" class="ai-pin" onclick="pinAiMetric('${reportId}', '${token}', this)">📌 대시보드에 추가</button>`;
+    ${reportId.startsWith('cons-') ? '' : `<button type="button" class="ai-pin" onclick="pinAiMetric('${reportId}', '${token}', this)">📌 대시보드에 추가</button>`}`;
   bubble.appendChild(badge);
 }
 
@@ -1412,7 +1929,8 @@ async function createProject() {
   if (!name) return;
 
   const isPrivate = document.getElementById('newProjectPrivate').checked;
-  const body = { name, visibility: isPrivate ? 'private' : 'public' };
+  const typeEl = document.querySelector('input[name="newProjectType"]:checked');
+  const body = { name, visibility: isPrivate ? 'private' : 'public', type: typeEl ? typeEl.value : 'doc' };
   if (newProjectParentId) body.parentId = newProjectParentId;
 
   const result = await api('/api/projects', {

@@ -13,6 +13,8 @@ const sheetStore = require('./lib/sheet-store');
 const { evaluateMetric } = require('./lib/metric-eval');
 const { computeStatsFromSheetData, collectFailItems } = require('./lib/report-stats');
 const { computeDetailStats } = require('./lib/detail-stats');
+const pwAdapter = require('./lib/adapters/playwright');
+const { consolidate } = require('./lib/consolidate');
 
 require('dotenv').config();
 
@@ -43,6 +45,8 @@ function createOAuth2Client() {
 // ──────────── QA 통합 (INTEGRATION_SPEC §5.2) ────────────
 // INTEGRATED=1 일 때만 동작 — 미설정 시 기존 자체 로그인 그대로 (배포 회귀 방지)
 const INTEGRATED = process.env.INTEGRATED === '1';
+// LOCAL_DEV=1 — 로컬 개발 전용 인증 우회. 기본 OFF 이므로 배포/프로덕션엔 영향 없음.
+const LOCAL_DEV = process.env.LOCAL_DEV === '1';
 // TCGEN_URL: 서버 대 서버 검증용 (Docker 내부에서는 host.docker.internal 등)
 // TCGEN_PUBLIC_URL: 브라우저 리다이렉트·런처용 (미설정 시 TCGEN_URL 사용)
 const TCGEN_URL = (process.env.TCGEN_URL || 'http://localhost:5001').replace(/\/$/, '');
@@ -136,7 +140,11 @@ function initDB() {
 initDB();
 
 function loadDB() {
-  return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+  const db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+  // 결과 취합용 컬렉션 (레거시 DB 호환 — 없으면 초기화)
+  if (!Array.isArray(db.sources)) db.sources = [];
+  if (!Array.isArray(db.records)) db.records = [];
+  return db;
 }
 
 function saveDB(db) {
@@ -144,6 +152,9 @@ function saveDB(db) {
 }
 
 // Multer 설정
+// 업로드 상한 — Playwright 통짜 리포트 ZIP(첨부 포함, ~800MB급)까지 수용
+const MAX_UPLOAD_MB = 1024;
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, REPORTS_DIR),
   filename: (req, file, cb) => {
@@ -162,7 +173,7 @@ const upload = multer({
       cb(new Error('HTML, ZIP, MD 또는 MMD/Mermaid 파일만 업로드 가능합니다.'));
     }
   },
-  limits: { fileSize: 200 * 1024 * 1024 }
+  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 }
 });
 
 // HTML 은 자산 URL(?v=__V__)에 앱 버전을 주입해 서빙 — 배포 시 URL 이 바뀌어
@@ -238,6 +249,14 @@ const SSO_REVERIFY_MS = 5 * 60 * 1000;
 async function requireAuth(req, res, next) {
   // 공개 경로는 통과
   if (PUBLIC_PATHS.some(p => req.path.startsWith(p))) return next();
+
+  // 로컬 개발 우회 (LOCAL_DEV=1) — Google 로그인 없이 고정 개발 사용자로 통과
+  if (LOCAL_DEV) {
+    if (!req.session.googleUser) {
+      req.session.googleUser = { email: 'local@dev', name: 'Local Dev', picture: '' };
+    }
+    return next();
+  }
 
   if (req.session.googleUser) {
     // 자체 로그인 세션이거나 비통합 모드면 그대로 신뢰
@@ -526,7 +545,7 @@ app.get('/api/projects', (req, res) => {
 // 프로젝트 생성 (parentId 선택적)
 app.post('/api/projects', (req, res) => {
   const db = loadDB();
-  const { name, parentId, visibility } = req.body;
+  const { name, parentId, visibility, type } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: '프로젝트명을 입력하세요.' });
 
   // depth 체크 (max 3)
@@ -542,6 +561,8 @@ app.post('/api/projects', (req, res) => {
     name: name.trim(),
     parentId: parentId || null,
     visibility: visibility || 'public', // 'public' 또는 'private'
+    // 폴더 유형(§4): 'result'(결과 취합·대시보드) / 'doc'(문서 뷰어, 현행·기본)
+    type: type === 'result' ? 'result' : 'doc',
     ownerId: req.session.googleUser.email,
     createdAt: new Date().toISOString()
   };
@@ -600,6 +621,17 @@ app.get('/api/projects/:id/reports', (req, res) => {
     .filter(r => r.projectId === req.params.id)
     .sort((a, b) => b.date.localeCompare(a.date) || new Date(b.uploadedAt) - new Date(a.uploadedAt));
 
+  // 폴더 리포트의 Playwright 여부 lazy 감지 — 플래그 도입 전 업로드분도 1회 스캔 후 저장
+  let flagged = false;
+  for (const r of reports) {
+    if (r.type === 'folder' && r.playwright === undefined && r.folderId) {
+      const dirAbs = path.join(REPORTS_DIR, r.folderId);
+      r.playwright = fs.existsSync(dirAbs) && findPlaywrightDirs(dirAbs, r.folderId).length > 0;
+      flagged = true;
+    }
+  }
+  if (flagged) saveDB(db);
+
   const grouped = {};
   for (const r of reports) {
     if (!grouped[r.date]) grouped[r.date] = [];
@@ -615,10 +647,22 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
   const project = db.projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
 
+  // 결과형 프로젝트 — 파일 업로드 탭도 공통 진입점(§11): Playwright ZIP 자동 감지 → 취합 소스로 등록
+  if (project.type === 'result') {
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: '업로드된 파일이 없습니다.' });
+    const { addedSources, skipped } = registerPlaywrightSources(db, project, req.files, {
+      uploadedBy: req.body.uploadedBy,
+      sessionEmail: req.session.googleUser && req.session.googleUser.email,
+    });
+    saveDB(db);
+    return res.json({ success: true, consolidated: true, sources: addedSources, skipped });
+  }
+
   const date = req.body.date || new Date().toISOString().slice(0, 10);
   const uploadedBy = req.body.uploadedBy || '익명';
   const automation = req.body.automation === '1';
   const newReports = [];
+  const notices = [];
 
   for (const file of req.files) {
     const ext = path.extname(file.originalname).toLowerCase();
@@ -632,11 +676,18 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
       const indexFilePath = path.join(REPORTS_DIR, indexPath || `${extractDir}/index.html`);
       const searchIndex = fs.existsSync(indexFilePath) ? extractSearchIndex(indexFilePath, 'html') : '';
 
+      // 문서형에 올라온 Playwright 리포트(단일/통짜) — 열람용으로는 저장하되(현행 유지) 취합 안내 제공
+      const isPlaywright = findPlaywrightDirs(path.join(REPORTS_DIR, extractDir), extractDir).length > 0;
+      if (isPlaywright) {
+        notices.push(`'${originalName}' 은(는) Playwright 리포트입니다 — 결과형 프로젝트에 업로드하면 TC 취합 대시보드로 집계됩니다.`);
+      }
+
       const report = {
         id: uuidv4(),
         projectId: req.params.id,
         originalName: originalName.replace('.zip', ''),
         type: 'folder',
+        playwright: isPlaywright,
         folderId: extractDir,
         indexPath: indexPath || `${extractDir}/index.html`,
         date,
@@ -693,7 +744,207 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
   }
 
   saveDB(db);
-  res.json({ success: true, reports: newReports });
+  res.json({ success: true, reports: newReports, notices });
+});
+
+// ──────────── 결과 취합 (result-type 프로젝트) ────────────
+// RESULT_CONSOLIDATION_SPEC.md — 소스 등록(어댑터 파싱→정규화 저장) + 통합 pivot 조회.
+
+// 추출 폴더에서 Playwright 리포트 디렉터리 탐색 — 루트가 단일 리포트든,
+// 여러 리포트 폴더를 담은 통짜 ZIP(pw-report.zip, 맥 압축의 상위 폴더 한 겹 포함)이든 모두 찾는다.
+// rel 은 REPORTS_DIR 기준. __MACOSX·숨김 폴더는 제외, 깊이 2까지.
+function findPlaywrightDirs(rootAbs, rootRel, depth = 0) {
+  if (pwAdapter.supports(rootAbs)) return [{ abs: rootAbs, rel: rootRel, name: depth ? path.basename(rootAbs) : null }];
+  if (depth >= 2) return [];
+  const found = [];
+  for (const entry of fs.readdirSync(rootAbs, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === '__MACOSX' || entry.name.startsWith('.')) continue;
+    found.push(...findPlaywrightDirs(path.join(rootAbs, entry.name), `${rootRel}/${entry.name}`, depth + 1));
+  }
+  return found;
+}
+
+// Playwright 리포트 디렉터리들 → 소스 + 정규화 레코드 등록 (ZIP 업로드·문서형 전환 공용)
+function registerPlaywrightDirs(db, project, reportDirs, { sourceRole = 'automation', snapshot = null, uploadedBy, sessionEmail, fallbackName = '' } = {}) {
+  const addedSources = [];
+  const skipped = [];
+
+  for (const rep of reportDirs) {
+    let parsed;
+    try {
+      parsed = pwAdapter.parse(rep.abs, { snapshot, source: sourceRole });
+    } catch (e) {
+      skipped.push({ file: rep.name || fallbackName, reason: `파싱 실패: ${e.message}` });
+      continue;
+    }
+
+    const sourceId = uuidv4();
+    const source = {
+      id: sourceId,
+      projectId: project.id,
+      filename: rep.name || fallbackName,
+      format: 'playwright',
+      sourceRole,
+      snapshot: parsed.detected.snapshot || snapshot,
+      exchange: parsed.detected.exchange || null,
+      folderId: rep.rel,               // /uploads/{rel}/index.html 로 원본 열람
+      indexPath: `${rep.rel}/index.html`,
+      stats: parsed.detected.stats || null,
+      rowCount: parsed.rows.length,
+      importedAt: new Date().toISOString(),
+      importedBy: uploadedBy || sessionEmail || '익명',
+    };
+    db.sources.push(source);
+
+    for (const row of parsed.rows) {
+      db.records.push({ id: uuidv4(), sourceId, projectId: project.id, reportDirRel: rep.rel, ...row });
+    }
+    addedSources.push({ id: sourceId, filename: source.filename, exchange: source.exchange, rowCount: source.rowCount, stats: source.stats });
+  }
+
+  return { addedSources, skipped };
+}
+
+// Playwright ZIP → 소스 + 정규화 레코드 등록 — /sources 와 /reports(결과형 자동 감지) 공용.
+// ZIP 하나에 리포트 폴더가 여러 개면 폴더별로 소스를 등록한다(폴더명 [Binance] 등에서 거래소 감지).
+function registerPlaywrightSources(db, project, files, opts = {}) {
+  const addedSources = [];
+  const skipped = [];
+
+  for (const file of files) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    if (ext !== '.zip') { skipped.push({ file: originalName, reason: '현재 ZIP(Playwright 리포트)만 지원' }); continue; }
+
+    const zipPath = path.join(REPORTS_DIR, file.filename);
+    const { extractDir } = extractZip(zipPath);
+    const rootAbs = path.join(REPORTS_DIR, extractDir);
+    const reportDirs = findPlaywrightDirs(rootAbs, extractDir);
+
+    if (!reportDirs.length) {
+      skipped.push({ file: originalName, reason: 'Playwright 리포트로 인식되지 않음(임베드 report.json 없음)' });
+      rmDir(rootAbs);
+      continue;
+    }
+
+    const r = registerPlaywrightDirs(db, project, reportDirs, { ...opts, fallbackName: originalName.replace(/\.zip$/i, '') });
+    addedSources.push(...r.addedSources);
+    skipped.push(...r.skipped);
+  }
+
+  return { addedSources, skipped };
+}
+
+// 소스 업로드/등록 — 현재 Playwright HTML 리포트 ZIP 지원(자동화 소스).
+app.post('/api/projects/:id/sources', upload.array('files', 20), (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  if (project.type !== 'result') return res.status(400).json({ error: '결과형 프로젝트에서만 소스를 취합할 수 있습니다.' });
+  if (!req.files || req.files.length === 0) return res.status(400).json({ error: '업로드된 파일이 없습니다.' });
+
+  const { addedSources, skipped } = registerPlaywrightSources(db, project, req.files, {
+    sourceRole: req.body.sourceRole || 'automation',
+    snapshot: (req.body.snapshot || '').trim() || null,
+    uploadedBy: req.body.uploadedBy,
+    sessionEmail: req.session.googleUser && req.session.googleUser.email,
+  });
+
+  saveDB(db);
+  res.json({ success: true, sources: addedSources, skipped });
+});
+
+// 소스 목록
+app.get('/api/projects/:id/sources', (req, res) => {
+  const db = loadDB();
+  const sources = db.sources.filter(s => s.projectId === req.params.id);
+  res.json(sources);
+});
+
+// 소스 삭제 — 소스 + 파생 레코드 + 추출 파일 제거
+app.delete('/api/sources/:id', (req, res) => {
+  const db = loadDB();
+  const source = db.sources.find(s => s.id === req.params.id);
+  if (!source) return res.status(404).json({ error: '소스를 찾을 수 없습니다.' });
+  if (source.folderId) rmDir(path.join(REPORTS_DIR, source.folderId));
+  db.records = db.records.filter(r => r.sourceId !== source.id);
+  db.sources = db.sources.filter(s => s.id !== source.id);
+  saveDB(db);
+  res.json({ success: true });
+});
+
+// 통합 pivot 조회 — 소스에서 실시간 계산
+app.get('/api/projects/:id/consolidated', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  const records = db.records.filter(r => r.projectId === req.params.id);
+  const byExchange = req.query.byExchange !== '0';
+  const result = consolidate(records, { byExchange });
+  const sources = db.sources.filter(s => s.projectId === req.params.id);
+  res.json({ ...result, sourceFiles: sources, pinnedWidgets: project.pinnedWidgets || [] });
+});
+
+// 취합 대시보드 위젯 고정/해제 — project.pinnedWidgets (프로젝트 스코프, 전체 열람자 공유)
+const CONS_WIDGET_KEYS = ['exchangeStats'];
+
+app.post('/api/projects/:id/widgets', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  const key = req.body && req.body.key;
+  if (!CONS_WIDGET_KEYS.includes(key)) return res.status(400).json({ error: '지원하지 않는 위젯입니다.' });
+  project.pinnedWidgets = project.pinnedWidgets || [];
+  if (!project.pinnedWidgets.includes(key)) project.pinnedWidgets.push(key);
+  saveDB(db);
+  res.json({ success: true, pinnedWidgets: project.pinnedWidgets });
+});
+
+// 문서형 → 결과형 전환 — 이미 업로드된 Playwright 폴더 리포트를 취합 소스로 인수 (재업로드 불필요)
+app.post('/api/projects/:id/convert-to-result', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  if (project.type === 'result') return res.json({ success: true, already: true, sources: [], skipped: [] });
+
+  const folderReports = db.reports.filter(r => r.projectId === project.id && r.type === 'folder');
+  const convertible = [];
+  for (const r of folderReports) {
+    const dirAbs = path.join(REPORTS_DIR, r.folderId);
+    if (!r.folderId || !fs.existsSync(dirAbs)) continue;
+    const dirs = findPlaywrightDirs(dirAbs, r.folderId);
+    if (dirs.length) convertible.push({ report: r, dirs });
+  }
+  if (!convertible.length) return res.status(400).json({ error: '전환할 Playwright 리포트가 없습니다.' });
+
+  project.type = 'result';
+  const opts = {
+    uploadedBy: (req.body && req.body.uploadedBy) || null,
+    sessionEmail: req.session.googleUser && req.session.googleUser.email,
+  };
+  const addedSources = [];
+  const skipped = [];
+  const convertedIds = new Set();
+  for (const c of convertible) {
+    const r2 = registerPlaywrightDirs(db, project, c.dirs, { ...opts, fallbackName: c.report.originalName });
+    addedSources.push(...r2.addedSources);
+    skipped.push(...r2.skipped);
+    convertedIds.add(c.report.id);
+  }
+  // 전환된 Playwright 리포트 항목은 목록에서 제거 — 추출 폴더는 소스가 인수하므로 파일은 그대로 둠
+  db.reports = db.reports.filter(r => !convertedIds.has(r.id));
+  const remainingDocs = db.reports.filter(r => r.projectId === project.id).length;
+  saveDB(db);
+  res.json({ success: true, sources: addedSources, skipped, remainingDocs });
+});
+
+app.delete('/api/projects/:id/widgets/:key', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  project.pinnedWidgets = (project.pinnedWidgets || []).filter(k => k !== req.params.key);
+  saveDB(db);
+  res.json({ success: true, pinnedWidgets: project.pinnedWidgets });
 });
 
 // 다이어그램 업로드 — mermaid 코드 붙여넣기 (JSON body, 파일 업로드 없이)
@@ -1369,6 +1620,16 @@ function sseSend(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+// 대화 이력 정제 — 최근 N개, 역할/길이 제한. 유효한 질문이 없으면 null.
+function parseChatHistory(req) {
+  const history = (Array.isArray(req.body && req.body.messages) ? req.body.messages : [])
+    .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
+    .slice(-CHAT_MAX_HISTORY)
+    .map(m => ({ role: m.role, content: m.content.slice(0, CHAT_MAX_QUESTION) }));
+  if (history.length === 0 || history[history.length - 1].role !== 'user') return null;
+  return history;
+}
+
 // AI Q&A — SSE 스트리밍 (text / metric / done / error 이벤트)
 app.post('/api/reports/:id/chat', async (req, res) => {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -1381,16 +1642,13 @@ app.post('/api/reports/:id/chat', async (req, res) => {
   if (!sheetData || !sheetData.sheets.length) {
     return res.status(400).json({ error: '시트 데이터가 없습니다. 리포트를 새로고침해 주세요.' });
   }
+  const history = parseChatHistory(req);
+  if (!history) return res.status(400).json({ error: '질문이 없습니다.' });
+  await streamSheetChat(res, report.originalName, sheetData, history);
+});
 
-  // 대화 이력 정제 — 최근 N개, 역할/길이 제한
-  const history = (Array.isArray(req.body && req.body.messages) ? req.body.messages : [])
-    .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
-    .slice(-CHAT_MAX_HISTORY)
-    .map(m => ({ role: m.role, content: m.content.slice(0, CHAT_MAX_QUESTION) }));
-  if (history.length === 0 || history[history.length - 1].role !== 'user') {
-    return res.status(400).json({ error: '질문이 없습니다.' });
-  }
-
+// 시트 형태 데이터에 대한 SSE 채팅 세션 — 단건 리포트와 취합 뷰가 공유
+async function streamSheetChat(res, displayName, sheetData, history) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -1400,7 +1658,7 @@ app.post('/api/reports/:id/chat', async (req, res) => {
 
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic();
-  const context = buildSheetContext(report, sheetData);
+  const context = buildSheetContext({ originalName: displayName }, sheetData);
   const system = [
     { type: 'text', text: CHAT_SYSTEM_RULES },
     { type: 'text', text: `리포트 컨텍스트:\n${context.text}`, cache_control: { type: 'ephemeral' } },
@@ -1450,6 +1708,118 @@ app.post('/api/reports/:id/chat', async (req, res) => {
     sseSend(res, 'error', { message: 'AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.' });
   }
   res.end();
+}
+
+// ── 취합(결과형 프로젝트) AI — 통합 pivot 을 시트 형태로 변환해 동일 파이프라인 재사용 ──
+
+function consolidatedAsSheetData(cons) {
+  const header = ['TC ID', '거래소', '영역', ...cons.sources, '최종', '불일치', '사유'];
+  const rows = cons.rows.map(r => [
+    r.tcId, r.exchange || '', r.suite || '',
+    ...cons.sources.map(s => (r.sources[s] ? r.sources[s].result : '')),
+    r.final, r.mismatch ? 'Y' : '',
+    Object.values(r.sources).map(c => c.reason).find(Boolean) || '',
+  ]);
+  return { sheets: [{ name: '통합결과', header, rows }] };
+}
+
+// 공통 로드 — 프로젝트 확인 + 취합 계산. 실패 시 응답까지 처리하고 null.
+function loadConsolidatedFor(req, res) {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) { res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' }); return null; }
+  const records = db.records.filter(r => r.projectId === project.id);
+  if (!records.length) { res.status(400).json({ error: '취합된 결과가 없습니다.' }); return null; }
+  return { project, cons: consolidate(records) };
+}
+
+app.post('/api/projects/:id/consolidated/chat', async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(503).json({ error: 'AI 기능이 설정되지 않았습니다.' });
+  }
+  const loaded = loadConsolidatedFor(req, res);
+  if (!loaded) return;
+  const history = parseChatHistory(req);
+  if (!history) return res.status(400).json({ error: '질문이 없습니다.' });
+  await streamSheetChat(res, `${loaded.project.name} — 통합 결과`, consolidatedAsSheetData(loaded.cons), history);
+});
+
+async function generateConsFailAnalysis(projectId, cons, fails, fingerprint) {
+  // 결정적 집계는 서버가 — 축별 분포 + 사유 패턴 상위. AI 는 클러스터링·해석만.
+  const dist = {};
+  for (const ax of cons.axes || []) {
+    dist[ax.name] = Object.fromEntries(ax.values.map(v => [String(v.value), { Fail: v.fail, Pass: v.pass, 'N/T': v.nt }]));
+  }
+  const Anthropic = require('@anthropic-ai/sdk');
+  const client = new Anthropic();
+  const resp = await client.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 2000,
+    thinking: { type: 'adaptive' },
+    system: FAIL_ANALYSIS_RULES,
+    messages: [{
+      role: 'user',
+      content: JSON.stringify({
+        분포_축별: dist,
+        사유_패턴_상위: (cons.failReasons || []).map(g => ({ 패턴: g.pattern, 건수: g.count })),
+        fail_목록: fails,
+      }),
+    }],
+  });
+  const markdown = resp.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+  if (!markdown) throw new Error('빈 분석 결과');
+
+  const analysis = { fingerprint, markdown, generatedAt: new Date().toISOString(), failCount: fails.length };
+  const db = loadDB();
+  const p = db.projects.find(x => x.id === projectId);
+  if (p) { p.failAnalysis = analysis; saveDB(db); }
+  return analysis;
+}
+
+app.get('/api/projects/:id/consolidated/fail-analysis', async (req, res) => {
+  if (!process.env.ANTHROPIC_API_KEY) return res.json({ disabled: true });
+  const loaded = loadConsolidatedFor(req, res);
+  if (!loaded) return;
+  const { project, cons } = loaded;
+
+  const fails = cons.rows
+    .filter(r => r.final === 'Fail' || r.mismatch)
+    .map(r => ({
+      tc: r.tcId,
+      거래소: r.exchange || undefined,
+      영역: r.suite || undefined,
+      불일치: r.mismatch || undefined,
+      사유: Object.values(r.sources).map(c => c.reason).find(Boolean) || undefined,
+    }));
+  if (fails.length === 0) {
+    if (project.failAnalysis) {
+      const db = loadDB();
+      const p = db.projects.find(x => x.id === project.id);
+      if (p) { delete p.failAnalysis; saveDB(db); }
+    }
+    return res.json({ none: true });
+  }
+
+  const crypto = require('crypto');
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(fails)).digest('hex');
+  if (req.query.force !== '1' && project.failAnalysis && project.failAnalysis.fingerprint === fingerprint) {
+    return res.json({ ok: true, cached: true, ...project.failAnalysis });
+  }
+
+  const flightKey = 'cons-' + project.id;
+  let job = _failAnalysisInFlight.get(flightKey);
+  if (!job) {
+    job = generateConsFailAnalysis(project.id, cons, fails, fingerprint)
+      .finally(() => _failAnalysisInFlight.delete(flightKey));
+    _failAnalysisInFlight.set(flightKey, job);
+  }
+  try {
+    const analysis = await job;
+    res.json({ ok: true, cached: false, ...analysis });
+  } catch (e) {
+    console.error('취합 Fail 분석 생성 오류:', e.message);
+    res.status(502).json({ error: 'Fail 분석 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.' });
+  }
 });
 
 // Markdown / 다이어그램 렌더링 엔드포인트
@@ -1988,6 +2358,18 @@ function getCellClass(value) {
 function escapeHtmlServer(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+
+// 업로드 오류를 사용자 메시지로 변환 — multer 500 스택 노출 대신 명확한 사유 반환
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const msg = err.code === 'LIMIT_FILE_SIZE'
+      ? `파일이 너무 큽니다 (최대 ${MAX_UPLOAD_MB}MB)`
+      : `업로드 오류: ${err.message}`;
+    return res.status(413).json({ error: msg });
+  }
+  if (err) return res.status(500).json({ error: err.message || '서버 오류' });
+  next();
+});
 
 app.listen(PORT, () => {
   console.log(`\n🧪 테스트 리포트 포털 실행 중`);
