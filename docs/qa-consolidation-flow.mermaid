@@ -1,0 +1,22 @@
+%% 결과 취합 기능 흐름 — 두 모드는 매핑/미리보기 이후 동일한 파이프라인으로 수렴
+flowchart TD
+    P[프로젝트 생성<br/>기본 취합 방식 선택]:::step
+    P --> U[결과 파일 업로드]:::step
+    U --> D{자동 감지<br/>자동화 컬럼 있음?}:::dec
+
+    D -->|여러 파일| M1[파일 분리형<br/>파일별 소스 태그]:::mode
+    D -->|단일 파일 · 다중 컬럼| M2[단일 파일형<br/>컬럼 → 소스 매핑]:::mode
+
+    M1 --> K[TC ID · 스냅샷 매핑 확인]:::step
+    M2 --> K
+    K --> PV[미리보기<br/>매칭 N · 미매칭 X · 불일치]:::step
+    PV -->|수정 필요| K
+    PV -->|확인| N[정규화 long<br/>TC ID + 스냅샷 병합]:::proc
+    N --> R[실시간 대시보드 +<br/>통합 pivot 표]:::out
+    R -.->|필요 시| E[통합본 내보내기<br/>xlsx / Google Sheet]:::out
+
+    classDef step fill:#e6f1fb,stroke:#378add,color:#0c447c;
+    classDef dec fill:#fef3c7,stroke:#f59e0b,color:#7c4a03;
+    classDef mode fill:#efeafd,stroke:#7c3aed,color:#4c1d95;
+    classDef proc fill:#f1efe8,stroke:#8a887f,color:#44443f;
+    classDef out fill:#e1f5ee,stroke:#1d9e75,color:#0f6e56;

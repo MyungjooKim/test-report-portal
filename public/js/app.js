@@ -410,8 +410,711 @@ async function showProjectView(id) {
       ).join('');
   }
 
-  const grouped = await api(`/api/projects/${id}/reports`);
-  renderDateGroups(grouped);
+  // 유형 분기 (§4): 결과형 = 취합 대시보드, 문서형 = 리포트 목록(현행)
+  const isResult = project && project.type === 'result';
+  // 결과형은 업로드 진입점 단일화(§8 위저드) — 문서형만 리포트 업로드 노출
+  document.getElementById('btnUploadReport').style.display = isResult ? 'none' : '';
+  document.getElementById('btnUploadSource').style.display = isResult ? '' : 'none';
+  document.getElementById('btnRefreshConsolidated').style.display = isResult ? '' : 'none';
+  document.getElementById('dateGroups').style.display = isResult ? 'none' : '';
+  document.getElementById('consolidatedView').style.display = isResult ? '' : 'none';
+
+  if (isResult) {
+    await renderConsolidated(id);
+  } else {
+    const grouped = await api(`/api/projects/${id}/reports`);
+    renderDateGroups(grouped);
+    renderConvertBanner(grouped);
+  }
+}
+
+// 문서형 프로젝트에 Playwright 리포트가 있으면 결과형 전환 제안 배너 표시
+function renderConvertBanner(grouped) {
+  const all = Object.values(grouped || {}).flat();
+  if (!all.some(r => r.playwright)) return;
+  document.getElementById('dateGroups').insertAdjacentHTML('afterbegin', `
+    <div class="pw-convert-banner">
+      <div class="pw-convert-text">🤖 <b>Playwright 리포트가 감지되었습니다.</b><br>
+        결과형으로 전환하면 업로드된 리포트가 취합 소스로 자동 등록되고, TC ID 기준 취합 대시보드(통계·거래소축·Fail 인사이트·AI 분석)를 볼 수 있어요.</div>
+      <button class="btn btn-primary" onclick="convertToResult()">결과형으로 전환하기</button>
+    </div>`);
+}
+
+async function convertToResult() {
+  if (!currentProjectId) return;
+  const msg = '이 프로젝트를 결과형으로 전환할까요?\n\n'
+    + '· Playwright 리포트 → 취합 소스로 자동 등록 (재업로드 불필요)\n'
+    + '· 그 외 문서형 리포트(HTML/Sheets/다이어그램)는 결과형 화면에서 표시되지 않습니다 (데이터는 보존)\n'
+    + '· 전환 후 문서형으로 되돌리기는 지원되지 않습니다';
+  if (!confirm(msg)) return;
+
+  showLoadingOverlay('결과형으로 전환하고 있습니다...');
+  const d = await api(`/api/projects/${currentProjectId}/convert-to-result`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  hideLoadingOverlay();
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '전환 실패'), 'error'); return; }
+
+  const rows = (d.sources || []).reduce((a, s) => a + (s.rowCount || 0), 0);
+  showToast(`✅ 결과형 전환 완료 — 소스 ${(d.sources || []).length}개 · ${rows}행 취합`, 'success');
+  (d.skipped || []).forEach(s => showToast(`⚠️ ${s.file}: ${s.reason}`, 'error'));
+  await loadProjects();
+  showProjectView(currentProjectId);
+}
+
+// ===== 결과 취합 대시보드 (결과형 프로젝트) =====
+let consolidatedData = null;
+let consolidatedFilter = 'all';
+
+// 대시보드 구성: 스펙 §9.3 (2026-07-21 개정) ① 요약 밴드 → ② 축별 분포 → ③ Fail 사유 패턴
+// → ④ 소스 파일(접힘) → ⑤ pivot 표(스크롤) → ⑥ AI(Fail 분석 + Q&A).
+// 기존 단건 대시보드의 dash-*/detail-*/ai-* 문법 재사용. 필터 클릭은 축·칩·표만 부분 렌더
+// (전체 재렌더 시 AI 대화가 초기화되므로).
+let consAxisFilter = null;   // { key: 'exchange'|'suite'|'source', value }
+let consReasonFilter = null; // failReasons 인덱스
+let consSearchQ = '';
+let consProjectId = null;
+
+async function renderConsolidated(id) {
+  const container = document.getElementById('consolidatedView');
+  container.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>취합 계산 중…</p></div>';
+  const data = await api(`/api/projects/${id}/consolidated`);
+  if (data.error) { container.innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error)}</p></div>`; return; }
+  consolidatedData = data;
+  consProjectId = id;
+  consolidatedFilter = 'all'; consAxisFilter = null; consReasonFilter = null; consSearchQ = '';
+  Object.keys(consDetailCache).forEach(k => delete consDetailCache[k]); // 데이터 갱신 시 상세 캐시 무효화
+
+  if (!data.sourceFiles || data.sourceFiles.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📊</div>
+        <h3>취합할 결과 소스가 없습니다</h3>
+        <p>Playwright 리포트 ZIP을 업로드하면 TC ID 기준으로 취합됩니다.</p>
+        <button class="btn btn-primary" onclick="openSourceModal()">📊 결과 소스 업로드</button>
+      </div>`;
+    return;
+  }
+  renderConsolidatedBody();
+}
+
+function renderConsolidatedBody() {
+  const container = document.getElementById('consolidatedView');
+  const data = consolidatedData;
+  const s = data.stats;
+  const multi = data.sources.length >= 2; // 불일치·커버리지는 소스 2종 이상일 때만 의미 있음
+
+  // ① 요약 밴드 — Pass Rate·실행률 게이지 + 카운트 (모수: 전체 = 실행(P+F) + N/T)
+  const execRate = s.totalTc ? Math.round((s.executed / s.totalTc) * 100) : 0;
+  const rateColor = s.passRate >= 90 ? '#22c55e' : s.passRate >= 70 ? '#f59e0b' : '#ef4444';
+  const execColor = execRate >= 80 ? '#22c55e' : execRate >= 50 ? '#f59e0b' : '#6b7280';
+  const covPairs = Object.entries(s.coverage || {});
+  const summary = `
+    <div class="dash-panel cons-summary">
+      <div class="dash-summary">
+        <div class="dash-rate">
+          <div class="dash-rate-circle" style="--rate:${s.passRate}; --color:${rateColor}"><span class="dash-rate-value">${s.passRate}%</span></div>
+          <div class="dash-rate-label">Pass Rate (${s.byFinal.Pass}/${s.executed})</div>
+        </div>
+        <div class="dash-rate">
+          <div class="dash-rate-circle" style="--rate:${execRate}; --color:${execColor}"><span class="dash-rate-value">${execRate}%</span></div>
+          <div class="dash-rate-label">실행률 (${s.executed}/${s.totalTc})</div>
+        </div>
+        <div class="dash-counts">
+          <div class="dash-count pass"><span class="dash-count-value">${s.byFinal.Pass}</span><span class="dash-count-label">Pass</span></div>
+          <div class="dash-count fail"><span class="dash-count-value">${s.byFinal.Fail}</span><span class="dash-count-label">Fail</span></div>
+          <div class="dash-count skip"><span class="dash-count-value">${s.byFinal['N/T']}</span><span class="dash-count-label">N/T</span></div>
+          ${s.byFinal.Blocked ? `<div class="dash-count na"><span class="dash-count-value">${s.byFinal.Blocked}</span><span class="dash-count-label">Blocked</span></div>` : ''}
+          <div class="dash-count total" title="Pass + Fail + N/T (N/A 는 모수 제외) — 거래소별 행 기준"><span class="dash-count-value">${s.totalTc}</span><span class="dash-count-label">전체 TC</span></div>
+          ${s.uniqueTc ? `<div class="dash-count" title="거래소 중복 없는 TC ID 수 (N/A 포함) — 세트 규모"><span class="dash-count-value">${s.uniqueTc}</span><span class="dash-count-label">유니크 TC</span></div>` : ''}
+          ${s.byFinal['N/A'] ? `<div class="dash-count na" title="테스트 범위 밖(미개발·불필요 판정) — 지표 계산에서 제외"><span class="dash-count-value">${s.byFinal['N/A']}</span><span class="dash-count-label">범위 제외 N/A</span></div>` : ''}
+          ${multi ? `<div class="dash-count ${s.mismatch ? 'fail' : ''}" title="소스 간 결과 불일치"><span class="dash-count-value">${s.mismatch}</span><span class="dash-count-label">불일치</span></div>` : ''}
+          ${multi ? covPairs.map(([src, v]) => `<div class="dash-count"><span class="dash-count-value">${v}%</span><span class="dash-count-label">${escapeHtml(src)} 커버리지</span></div>`).join('') : ''}
+        </div>
+      </div>
+    </div>`;
+
+  // ④ 소스 파일 — 접힌 요약 한 줄, 펼치면 관리 목록
+  const files = data.sourceFiles;
+  const lastImported = files.reduce((m, f) => (f.importedAt > m ? f.importedAt : m), '');
+  const roles = [...new Set(files.map(f => f.sourceRole))].join(' · ');
+  const sourcesSection = `
+    <div class="cons-sources">
+      <button type="button" class="cons-sources-head" onclick="toggleConsSources()">
+        <span>소스 파일 ${files.length}개 · ${escapeHtml(roles)}${lastImported ? ` · 마지막 취합 ${formatTime(lastImported)}` : ''}</span>
+        <span class="fail-caret" id="consSourcesCaret">▸ 펼쳐보기</span>
+      </button>
+      <div class="cons-sources-body hidden" id="consSourcesBody">
+        ${files.map(f => `
+          <div class="cons-source-item">
+            <span class="src-badge src-${escapeAttr(f.sourceRole)}">${escapeHtml(f.sourceRole)}</span>
+            <span class="src-name">${escapeHtml(f.filename)}</span>
+            ${f.exchange ? `<span class="src-exch">${escapeHtml(f.exchange)}</span>` : ''}
+            <span class="src-meta">${f.rowCount} TC · ${f.snapshot ? escapeHtml(f.snapshot) + ' · ' : ''}${formatTime(f.importedAt)}</span>
+            ${f.folderId ? `<button class="btn-icon-sm" title="원본 리포트 열기" onclick="openReportDirect('/uploads/${escapeAttr(f.indexPath)}')">↗</button>` : ''}
+            <button class="btn-icon-sm danger" title="소스 삭제" onclick="deleteSource('${f.id}')">🗑</button>
+          </div>`).join('')}
+      </div>
+    </div>`;
+
+  // ⑥ AI — Fail 분석(자동) + Q&A. 기존 ai-*/fail-analysis 컴포넌트를 cons-<projectId> id로 재사용.
+  const aiOn = typeof QA_CONFIG !== 'undefined' && QA_CONFIG && QA_CONFIG.aiEnabled;
+  const aiId = 'cons-' + consProjectId;
+  const aiSection = aiOn ? `
+    <div class="dash-panel cons-ai">
+      ${s.byFinal.Fail > 0 ? `<div class="dash-section fail-analysis" id="fail-analysis-${aiId}"></div>` : ''}
+      ${renderAiSection(aiId)}
+    </div>` : '';
+
+  // 축/사유/필터/표는 부분 렌더 대상 — 컨테이너만 만들어 두고 아래에서 채움
+  container.innerHTML = summary
+    + '<div id="consAxesBox"></div><div id="consPinnedBox"></div><div id="consReasonsBox"></div>'
+    + sourcesSection
+    + '<div id="consFiltersBox"></div><div class="cons-table-wrap" id="consTableWrap"></div>'
+    + aiSection;
+  renderConsAxes();
+  renderConsPinned();
+  renderConsFilters();
+  renderConsTable();
+  if (aiOn && s.byFinal.Fail > 0) loadFailAnalysis(aiId);
+}
+
+// ②③ 축별 분포 + Fail 사유 패턴 — 필터 상태(active) 반영을 위해 부분 렌더
+function renderConsAxes() {
+  const data = consolidatedData;
+  const axesBox = document.getElementById('consAxesBox');
+  const reasonsBox = document.getElementById('consReasonsBox');
+  if (!axesBox || !reasonsBox) return;
+
+  const axesGroups = (data.axes || []).map(ax => {
+    const rows = ax.values.map(v => consStackRow(ax.key, v, ax.filterable !== false)).join('');
+    return rows ? `<div class="detail-group"><div class="dash-section-title">${escapeHtml(ax.name)}</div>${rows}</div>` : '';
+  }).join('');
+  axesBox.innerHTML = axesGroups ? `
+    <div class="dash-panel cons-axes">
+      <div class="detail-legend">
+        <span class="legend-item"><i class="legend-dot seg-pass"></i>Pass</span>
+        <span class="legend-item"><i class="legend-dot seg-fail"></i>Fail</span>
+        <span class="legend-item"><i class="legend-dot seg-nt"></i>N/T</span>
+        <span class="legend-item"><i class="legend-dot seg-na"></i>결과 없음</span>
+      </div>
+      ${axesGroups}
+    </div>` : '';
+
+  const reasons = data.failReasons || [];
+  const maxReason = reasons.length ? reasons[0].count : 1;
+  reasonsBox.innerHTML = reasons.length ? `
+    <div class="dash-panel cons-reasons">
+      <div class="dash-section-title">❌ Fail 사유 패턴 (상위 ${reasons.length})</div>
+      ${reasons.map((g, i) => `
+        <div class="detail-row cons-click-row ${consReasonFilter === i ? 'active' : ''}" onclick="setConsReasonFilter(${i})" title="클릭하면 해당 TC만 아래 표에 표시">
+          <span class="detail-row-label cons-reason-label" title="${escapeAttr(g.pattern)}">${escapeHtml(g.pattern)}</span>
+          <div class="detail-stack"><div class="stack-seg seg-fail" style="width:${((g.count / maxReason) * 100).toFixed(1)}%"></div></div>
+          <span class="detail-row-counts">${g.count}건</span>
+        </div>`).join('')}
+    </div>` : '';
+}
+
+// ⑤ 필터 버튼 + 검색 + 해제 칩 — 부분 렌더
+function renderConsFilters() {
+  const box = document.getElementById('consFiltersBox');
+  if (!box) return;
+  const data = consolidatedData;
+  const multi = data.sources.length >= 2;
+  const reasons = data.failReasons || [];
+  const chips = [];
+  if (consAxisFilter) chips.push(`<span class="cons-chip" onclick="setConsAxisFilter('${escapeAttr(consAxisFilter.key)}','${escapeAttr(consAxisFilter.value)}')" title="필터 해제">${escapeHtml(consAxisFilter.value)} ✕</span>`);
+  if (consReasonFilter !== null && reasons[consReasonFilter]) chips.push(`<span class="cons-chip" onclick="setConsReasonFilter(${consReasonFilter})" title="필터 해제">${escapeHtml(reasons[consReasonFilter].pattern)} ✕</span>`);
+  const filterKeys = multi ? [['all','전체'],['fail','Fail'],['mismatch','불일치'],['nt','N/T']] : [['all','전체'],['fail','Fail'],['nt','N/T']];
+  if (data.stats && data.stats.byFinal && data.stats.byFinal['N/A']) filterKeys.push(['na', 'N/A']);
+  box.innerHTML = `
+    <div class="cons-filters">
+      ${filterKeys.map(([k,label]) =>
+        `<button class="cons-filter ${consolidatedFilter===k?'active':''}" onclick="setConsFilter('${k}')">${label}</button>`).join('')}
+      <input type="text" class="cons-search" id="consSearch" placeholder="TC ID 검색…" value="${escapeAttr(consSearchQ)}" oninput="consSearchQ=this.value; renderConsTable()">
+      ${chips.join('')}
+      ${data.untagged.count ? `<span class="cons-untagged" title="TC ID 없는 테스트(setup/teardown/미태그)">미태그 ${data.untagged.count}건</span>` : ''}
+    </div>`;
+}
+
+// 축별 분포 스택 바 한 줄 (기존 renderStackRow와 동일 문법 + 클릭 필터)
+function consStackRow(axKey, v, filterable = true) {
+  const denom = v.total + (v.na || 0);
+  if (!denom) return '';
+  const seg = (n, cls, title) => n ? `<div class="stack-seg ${cls}" style="width:${((n / denom) * 100).toFixed(1)}%" title="${title} ${n}건"></div>` : '';
+  const counts = [
+    v.pass ? `P ${v.pass}` : '',
+    v.fail ? `F ${v.fail}` : '',
+    v.nt ? `N/T ${v.nt}` : '',
+    v.na ? `없음 ${v.na}` : '',
+  ].filter(Boolean).join(' · ');
+  const active = consAxisFilter && consAxisFilter.key === axKey && consAxisFilter.value === v.value;
+  const clickable = filterable && !/^기타 \(/.test(String(v.value)); // 환경축·'기타' 합산 행은 필터 불가
+  return `
+    <div class="detail-row ${clickable ? 'cons-click-row' : ''} ${active ? 'active' : ''}"
+         ${clickable ? `onclick="setConsAxisFilter('${escapeAttr(axKey)}','${escapeAttr(v.value)}')" title="클릭하면 아래 표를 필터링합니다"` : ''}>
+      <span class="detail-row-label" title="${escapeAttr(v.value)}">${escapeHtml(v.value)}</span>
+      <div class="detail-stack">${seg(v.pass,'seg-pass','Pass')}${seg(v.fail,'seg-fail','Fail')}${seg(v.nt,'seg-nt','N/T')}${seg(v.na,'seg-na','결과 없음')}</div>
+      <span class="detail-row-counts">${counts}</span>
+    </div>`;
+}
+
+function setConsFilter(k) {
+  consolidatedFilter = k;
+  // 사유 칩과 상태 필터의 AND 교집합이 0행이 되는 혼란 방지 — 상태 전환 시 사유 필터 해제
+  if (consReasonFilter !== null) { consReasonFilter = null; renderConsAxes(); }
+  renderConsFilters();
+  renderConsTable();
+}
+
+function setConsAxisFilter(key, value) {
+  consAxisFilter = (consAxisFilter && consAxisFilter.key === key && consAxisFilter.value === value) ? null : { key, value };
+  renderConsAxes(); renderConsFilters(); renderConsTable();
+}
+
+function setConsReasonFilter(i) {
+  consReasonFilter = consReasonFilter === i ? null : i;
+  renderConsAxes(); renderConsFilters(); renderConsTable();
+}
+
+function toggleConsSources() {
+  const body = document.getElementById('consSourcesBody');
+  const caret = document.getElementById('consSourcesCaret');
+  if (!body) return;
+  body.classList.toggle('hidden');
+  if (caret) caret.textContent = body.classList.contains('hidden') ? '▸ 펼쳐보기' : '▾ 접기';
+}
+
+function renderConsTable() {
+  if (!consolidatedData) return;
+  const wrap = document.getElementById('consTableWrap');
+  const q = (document.getElementById('consSearch')?.value || '').trim().toUpperCase();
+  const sources = consolidatedData.sources;
+  let rows = consolidatedData.rows;
+  if (consolidatedFilter === 'fail') rows = rows.filter(r => r.final === 'Fail');
+  else if (consolidatedFilter === 'mismatch') rows = rows.filter(r => r.mismatch);
+  else if (consolidatedFilter === 'nt') rows = rows.filter(r => r.final === 'N/T');
+  else if (consolidatedFilter === 'na') rows = rows.filter(r => r.final === 'N/A');
+  if (consAxisFilter) {
+    const { key, value } = consAxisFilter;
+    if (key === 'exchange') rows = rows.filter(r => r.exchange === value);
+    else if (key === 'suite') rows = rows.filter(r => r.suite === value);
+    else if (key === 'source') rows = rows.filter(r => r.sources[value]);
+  }
+  if (consReasonFilter !== null && consolidatedData.failReasons && consolidatedData.failReasons[consReasonFilter]) {
+    const keys = new Set(consolidatedData.failReasons[consReasonFilter].keys);
+    rows = rows.filter(r => keys.has(`${r.tcId} ${r.exchange || ''}`));
+  }
+  if (q) rows = rows.filter(r => r.tcId.toUpperCase().includes(q));
+
+  const hasExch = consolidatedData.rows.some(r => r.exchange);
+  const badge = (v) => `<span class="res-badge res-${v.replace('/','')}">${v}</span>`;
+  // 매뉴얼 셀은 환경×테스터 원본(D3 보존)을 툴팁으로 노출
+  const cellHtml = (cell) => {
+    if (!cell) return '<span class="res-empty">–</span>';
+    const tip = (cell.envResults || []).map(e => `${e.env}: ${e.result}`).join('\n');
+    return `<span ${tip ? `title="${escapeAttr(tip)}"` : ''}>${badge(cell.result)}</span>`
+      + (cell.flaky ? ' <span class="flaky" title="flaky">⚡</span>' : '');
+  };
+  const capped = rows.slice(0, 1000);
+
+  wrap.innerHTML = `
+    <div class="cons-count">${rows.length ? `${rows.length}행${rows.length > capped.length ? ` (상위 ${capped.length}만 표시)` : ''}` : '조건에 맞는 행이 없습니다 — 상태 필터·사유 칩·검색어 조합을 확인하세요'}</div>
+    <table class="cons-table">
+      <thead><tr>
+        <th>TC ID</th>${hasExch ? '<th>거래소</th>' : ''}
+        ${sources.map(s => `<th>${escapeHtml(s)}</th>`).join('')}
+        <th>최종</th><th>사유</th>
+      </tr></thead>
+      <tbody>
+        ${capped.map(r => `
+          <tr class="cons-row ${r.mismatch ? 'row-mismatch' : ''}" data-tc="${escapeAttr(r.tcId)}" data-ex="${escapeAttr(r.exchange || '')}"
+              onclick="toggleConsDetail(this)" title="클릭하면 상세(스크린샷·영상)를 펼칩니다">
+            <td class="tc-id">${escapeHtml(r.tcId)}</td>
+            ${hasExch ? `<td>${escapeHtml(r.exchange || '')}</td>` : ''}
+            ${sources.map(s => `<td>${cellHtml(r.sources[s])}</td>`).join('')}
+            <td>${badge(r.final)}${r.mismatch ? ' <span class="mismatch-tag" title="소스 간 결과 불일치">⚠</span>' : ''}</td>
+            <td class="reason">${escapeHtml(firstReason(r) || '')}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`;
+  wrap.dataset.cols = 3 + (hasExch ? 1 : 0) + sources.length; // 확장 패널 colspan
+}
+
+// ── 행 확장 패널 — TC 상세(스크린샷 썸네일·사유·영상/트레이스 딥링크) lazy 조회 ──
+const consDetailCache = {};
+
+async function toggleConsDetail(tr) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('cons-detail-tr')) { next.remove(); tr.classList.remove('expanded'); return; }
+  document.querySelectorAll('.cons-detail-tr').forEach(el => {
+    el.previousElementSibling?.classList.remove('expanded');
+    el.remove(); // 한 번에 하나만 펼침
+  });
+
+  const tcId = tr.dataset.tc, ex = tr.dataset.ex;
+  const cols = document.getElementById('consTableWrap')?.dataset.cols || 5;
+  const detailTr = document.createElement('tr');
+  detailTr.className = 'cons-detail-tr';
+  detailTr.innerHTML = `<td colspan="${cols}"><div class="tcd-panel">불러오는 중…</div></td>`;
+  tr.after(detailTr);
+  tr.classList.add('expanded');
+
+  const key = `${tcId}|${ex}`;
+  if (!consDetailCache[key]) {
+    consDetailCache[key] = await api(`/api/projects/${consProjectId}/tc-detail?tcId=${encodeURIComponent(tcId)}&exchange=${encodeURIComponent(ex)}`);
+  }
+  const d = consDetailCache[key];
+  const panel = detailTr.querySelector('.tcd-panel');
+  if (!d || d.error || !(d.records || []).length) { panel.textContent = (d && d.error) || '상세 정보가 없습니다.'; return; }
+
+  panel.innerHTML = d.records.map(rec => {
+    const envChips = (rec.envResults || []).map(e =>
+      `<span class="tcd-env">${escapeHtml(e.env)}: <b>${escapeHtml(e.result)}</b></span>`).join('');
+    const imgs = (rec.images || []).map((u, i) =>
+      `<img class="tcd-thumb" src="${escapeAttr(u)}" loading="lazy" title="클릭하면 확대 (휠 줌·드래그 이동)"
+         onclick='openLightbox(${JSON.stringify(rec.images)}, ${i})'>`).join('');
+    return `
+      <div class="tcd-item">
+        <div class="tcd-head">
+          <span class="src-badge src-${escapeAttr(rec.source)}">${escapeHtml(rec.source)}</span>
+          <span class="res-badge res-${String(rec.result).replace('/', '')}">${escapeHtml(rec.result)}</span>
+          ${rec.exchange ? `<span class="src-exch">${escapeHtml(rec.exchange)}</span>` : ''}
+          ${rec.env ? `<span class="src-meta">${escapeHtml(rec.env)}</span>` : ''}
+          ${rec.flaky ? '<span class="flaky" title="flaky">⚡</span>' : ''}
+          ${rec.title ? `<span class="tcd-title" title="${escapeAttr(rec.title)}">${escapeHtml(rec.title)}</span>` : ''}
+          ${rec.deepLink ? `<a class="btn btn-sm tcd-deep" href="${escapeAttr(rec.deepLink)}" target="_blank" onclick="event.stopPropagation()">🎬 영상·트레이스 보기 →</a>` : ''}
+        </div>
+        ${rec.humanReason ? `
+          <div class="tcd-why">
+            <div class="tcd-why-label">왜 실패했나요</div>
+            <div>${escapeHtml(rec.humanReason)}</div>
+            ${(rec.errorDetail || rec.reason) ? `<details class="tcd-raw"><summary>원본 에러 메시지 보기</summary><pre>${escapeHtml(rec.errorDetail || rec.reason)}</pre></details>` : ''}
+          </div>`
+        : rec.reason ? `<div class="tcd-reason">${escapeHtml(rec.errorDetail || rec.reason)}</div>` : ''}
+        ${envChips ? `<div class="tcd-envs">${envChips}</div>` : ''}
+        ${imgs ? `<div class="tcd-thumbs">${imgs}</div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+// ── 줌·팬 라이트박스 — 휠 줌(커서 기준)·드래그 이동·←/→ 넘기기·ESC 닫기 ──
+let lb = null; // { images, idx, scale, tx, ty, dragging, sx, sy }
+
+function openLightbox(images, idx) {
+  event?.stopPropagation();
+  lb = { images, idx: idx || 0, scale: 1, tx: 0, ty: 0, dragging: false };
+  let el = document.getElementById('lightbox');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'lightbox';
+    el.innerHTML = `
+      <div class="lb-toolbar">
+        <span class="lb-count" id="lbCount"></span>
+        <a class="btn btn-sm" id="lbOpenTab" target="_blank">↗ 새 탭에서 열기</a>
+        <button class="btn btn-sm" onclick="closeLightbox()">✕ 닫기 (ESC)</button>
+      </div>
+      <button class="lb-nav lb-prev" onclick="lbNav(-1)">‹</button>
+      <img id="lbImg" draggable="false">
+      <button class="lb-nav lb-next" onclick="lbNav(1)">›</button>`;
+    document.body.appendChild(el);
+    el.addEventListener('click', (e) => { if (e.target === el) closeLightbox(); });
+    el.addEventListener('wheel', lbWheel, { passive: false });
+    const img = el.querySelector('#lbImg');
+    img.addEventListener('mousedown', (e) => { lb.dragging = true; lb.sx = e.clientX - lb.tx; lb.sy = e.clientY - lb.ty; e.preventDefault(); });
+    window.addEventListener('mousemove', (e) => { if (lb && lb.dragging) { lb.tx = e.clientX - lb.sx; lb.ty = e.clientY - lb.sy; lbApply(); } });
+    window.addEventListener('mouseup', () => { if (lb) lb.dragging = false; });
+    img.addEventListener('dblclick', () => { lb.scale = 1; lb.tx = 0; lb.ty = 0; lbApply(); });
+  }
+  el.classList.add('open');
+  document.addEventListener('keydown', lbKeys);
+  lbShow();
+}
+
+function lbShow() {
+  const img = document.getElementById('lbImg');
+  img.src = lb.images[lb.idx];
+  lb.scale = 1; lb.tx = 0; lb.ty = 0;
+  lbApply();
+  document.getElementById('lbCount').textContent = lb.images.length > 1 ? `${lb.idx + 1} / ${lb.images.length}` : '';
+  document.getElementById('lbOpenTab').href = lb.images[lb.idx];
+  document.querySelectorAll('.lb-nav').forEach(b => b.style.display = lb.images.length > 1 ? '' : 'none');
+}
+
+function lbApply() {
+  const img = document.getElementById('lbImg');
+  if (img) img.style.transform = `translate(${lb.tx}px, ${lb.ty}px) scale(${lb.scale})`;
+}
+
+function lbWheel(e) {
+  e.preventDefault();
+  if (!lb) return;
+  const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+  const next = Math.min(8, Math.max(0.2, lb.scale * factor));
+  // 커서 기준 줌 — 커서가 가리키는 지점이 그대로 머물도록 이동량 보정
+  const cx = e.clientX - window.innerWidth / 2;
+  const cy = e.clientY - window.innerHeight / 2;
+  lb.tx = cx - (cx - lb.tx) * (next / lb.scale);
+  lb.ty = cy - (cy - lb.ty) * (next / lb.scale);
+  lb.scale = next;
+  lbApply();
+}
+
+function lbNav(d) {
+  event?.stopPropagation();
+  lb.idx = (lb.idx + d + lb.images.length) % lb.images.length;
+  lbShow();
+}
+
+function lbKeys(e) {
+  if (e.key === 'Escape') closeLightbox();
+  else if (e.key === 'ArrowLeft' && lb && lb.images.length > 1) lbNav(-1);
+  else if (e.key === 'ArrowRight' && lb && lb.images.length > 1) lbNav(1);
+}
+
+function closeLightbox() {
+  document.getElementById('lightbox')?.classList.remove('open');
+  document.removeEventListener('keydown', lbKeys);
+  lb = null;
+}
+
+function firstReason(r) {
+  for (const s of Object.values(r.sources)) { if (s.reason) return s.reason; }
+  return null;
+}
+
+// ===== 결과 소스 업로드 위저드 (Phase 2 — §11: ①양식 감지 → ②매핑 확인 → ③미리보기 → ④취합) =====
+let wiz = null; // { step, files, gsheetUrl, preview, committed }
+
+const WIZ_STEPS = ['파일/양식', '매핑 확인', '미리보기', '취합 실행'];
+
+function openSourceModal() {
+  wiz = { step: 1, files: [], gsheetUrl: '', preview: null, committed: false };
+  renderWizard();
+  openModal('sourceModal');
+}
+
+function closeSourceWizard() {
+  // 미커밋 스테이징 정리 (수용기준: 취소 시 DB 무변화)
+  if (wiz && wiz.preview && !wiz.committed) {
+    api(`/api/consolidate/staging/${wiz.preview.stagingId}`, { method: 'DELETE' });
+  }
+  wiz = null;
+  closeModal('sourceModal');
+}
+
+function renderWizard() {
+  if (!wiz) return;
+  document.getElementById('wizSteps').innerHTML = WIZ_STEPS.map((label, i) =>
+    `<span class="wiz-step ${wiz.step === i + 1 ? 'active' : ''} ${wiz.step > i + 1 ? 'done' : ''}">${i + 1}. ${label}</span>`
+  ).join('<span class="wiz-sep">→</span>');
+  const body = document.getElementById('wizBody');
+  const footer = document.getElementById('wizFooter');
+  if (wiz.step === 1) { renderWizStep1(body, footer); }
+  else if (wiz.step === 2) { renderWizStep2(body, footer); }
+  else if (wiz.step === 3) { renderWizStep3(body, footer); }
+  else { renderWizStep4(body, footer); }
+}
+
+// ① 파일/양식 — 파일 드롭(ZIP/XLSX/CSV) 또는 Google Sheets URL, 양식은 서버가 자동 감지
+function renderWizStep1(body, footer) {
+  body.innerHTML = `
+    <div class="upload-zone" id="wizZone">
+      <div class="upload-zone-content">
+        <div class="upload-icon">📊</div>
+        <p>결과 파일을 드래그하거나 클릭하여 선택</p>
+        <span class="upload-hint">🤖 Playwright 리포트 ZIP · 📋 매뉴얼 결과 XLSX/CSV — 양식은 자동 감지됩니다</span>
+      </div>
+      <input type="file" id="wizFileInput" multiple accept=".zip,.xlsx,.xls,.csv" hidden>
+    </div>
+    <div class="upload-file-list" id="wizFileList"></div>
+    <div class="form-group" style="margin-top:12px">
+      <label>또는 Google Sheets URL <small>(매뉴얼 결과 시트)</small></label>
+      <input type="text" id="wizGsheetUrl" class="form-input" placeholder="https://docs.google.com/spreadsheets/d/…"
+        value="${escapeAttr(wiz.gsheetUrl)}" oninput="wiz.gsheetUrl=this.value.trim(); renderWizFooter1()">
+    </div>`;
+  footer.innerHTML = '';
+  renderWizFileList();
+  renderWizFooter1();
+  bindWizZone();
+}
+
+function renderWizFooter1() {
+  const ready = wiz.files.length > 0 || wiz.gsheetUrl;
+  document.getElementById('wizFooter').innerHTML = `
+    <button class="btn btn-secondary" onclick="closeSourceWizard()">취소</button>
+    <button class="btn btn-primary" onclick="runWizPreview()" ${ready ? '' : 'disabled'}>분석 →</button>`;
+}
+
+function bindWizZone() {
+  const zone = document.getElementById('wizZone');
+  const input = document.getElementById('wizFileInput');
+  if (!zone || !input) return;
+  const ACCEPT = /\.(zip|xlsx|xls|csv)$/i;
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    wiz.files.push(...Array.from(e.dataTransfer.files).filter(f => ACCEPT.test(f.name)));
+    renderWizFileList(); renderWizFooter1();
+  });
+  input.addEventListener('change', () => {
+    wiz.files.push(...Array.from(input.files)); input.value = '';
+    renderWizFileList(); renderWizFooter1();
+  });
+}
+
+function renderWizFileList() {
+  const el = document.getElementById('wizFileList');
+  if (!el) return;
+  el.innerHTML = wiz.files.map((f, i) => `
+    <div class="upload-file-item"><span>${/\.zip$/i.test(f.name) ? '🤖' : '📋'}</span>
+    <span class="file-name">${escapeHtml(f.name)}</span>
+    <button class="file-remove" onclick="wiz.files.splice(${i},1);renderWizFileList();renderWizFooter1()">✕</button></div>`).join('');
+}
+
+async function runWizPreview() {
+  if (!currentProjectId || !wiz) return;
+  showLoadingOverlay('양식을 감지하고 파싱하고 있습니다…');
+  const formData = new FormData();
+  for (const f of wiz.files) formData.append('files', f);
+  if (wiz.gsheetUrl) formData.append('gsheetUrl', wiz.gsheetUrl);
+  try {
+    const res = await fetch(`/api/projects/${currentProjectId}/consolidate/preview`, { method: 'POST', body: formData });
+    const d = await res.json();
+    hideLoadingOverlay();
+    if (!res.ok || d.error) {
+      showToast('❌ ' + (d.error || `분석 실패 (${res.status})`), 'error');
+      (d.skipped || []).forEach(s => showToast(`⚠️ ${s.file}: ${s.reason}`, 'error'));
+      return;
+    }
+    wiz.preview = d;
+    wiz.step = 2;
+    renderWizard();
+  } catch (e) {
+    hideLoadingOverlay();
+    showToast('❌ 분석 실패: ' + e.message, 'error');
+  }
+}
+
+// ② 매핑 확인 — 감지된 양식·시트·컬럼 표시 (D2: 선택 UI 없음, 확인만)
+function renderWizStep2(body, footer) {
+  const p = wiz.preview;
+  const itemHtml = p.items.map(item => {
+    const isPw = item.kind === 'playwright';
+    const sheets = (item.detected.sheets || []).map(s => `
+      <tr class="${s.adopted ? '' : 'wiz-excluded'}">
+        <td>${escapeHtml(s.name)}</td>
+        <td>${s.adopted ? `✓ ${s.rowCount}행` : `배제 — ${escapeHtml(s.reason || '')}`}</td>
+        <td>${s.adopted ? escapeHtml(isPw ? (s.exchange || '자동') : (s.resultLabels || []).join(', ')) : ''}</td>
+      </tr>`).join('');
+    return `
+      <div class="wiz-item">
+        <div class="wiz-item-head">
+          <span class="src-badge src-${isPw ? 'automation' : 'manual'}">${isPw ? '🤖 Playwright (자동화)' : `📋 매뉴얼 (${escapeHtml(item.format)})`}</span>
+          <span class="file-name">${escapeHtml(item.filename)}</span>
+          <span class="src-meta">${item.detected.rowCount}건 인식</span>
+        </div>
+        <table class="wiz-table">
+          <thead><tr><th>${isPw ? '리포트 폴더' : '시트'}</th><th>인식</th><th>${isPw ? '거래소' : '결과 컬럼 (환경×테스터)'}</th></tr></thead>
+          <tbody>${sheets}</tbody>
+        </table>
+      </div>`;
+  }).join('');
+  body.innerHTML = itemHtml + ((wiz.preview.skipped || []).length
+    ? `<div class="wiz-warn">⚠️ 제외: ${wiz.preview.skipped.map(s => `${escapeHtml(s.file)} (${escapeHtml(s.reason)})`).join(' · ')}</div>` : '');
+  footer.innerHTML = `
+    <button class="btn btn-secondary" onclick="wizBackToInput()">← 다시 선택</button>
+    <button class="btn btn-primary" onclick="wiz.step=3;renderWizard()">다음 →</button>`;
+}
+
+function wizBackToInput() {
+  if (wiz.preview) api(`/api/consolidate/staging/${wiz.preview.stagingId}`, { method: 'DELETE' });
+  wiz.preview = null;
+  wiz.step = 1;
+  renderWizard();
+}
+
+// ③ 미리보기 — 기존 TC 매칭·신규·예상 불일치 + 프리픽스(플랫폼) 경고 + 샘플
+function renderWizStep3(body, footer) {
+  const p = wiz.preview;
+  const m = p.matchPreview || {};
+  const warns = (p.warnings || []).map(w => `<div class="wiz-warn">⚠️ ${escapeHtml(w)}</div>`).join('');
+  const sample = (p.sample || []).map(r => `
+    <tr><td class="tc-id">${escapeHtml(r.tcId)}</td>
+      <td><span class="res-badge res-${String(r.result).replace('/', '')}">${escapeHtml(r.result)}</span></td>
+      <td>${escapeHtml(r.exchange || r.sheet || '')}</td>
+      <td>${(r.envResults || []).map(e => `${escapeHtml(e.env)}: ${escapeHtml(e.result)}`).join(' · ')}</td></tr>`).join('');
+  body.innerHTML = `
+    <div class="dash-counts wiz-match">
+      <div class="dash-count"><span class="dash-count-value">${m.existingTcCount || 0}</span><span class="dash-count-label">기존 TC</span></div>
+      <div class="dash-count pass"><span class="dash-count-value">${m.matched || 0}</span><span class="dash-count-label">매칭</span></div>
+      <div class="dash-count"><span class="dash-count-value">${m.newTc || 0}</span><span class="dash-count-label">신규 TC</span></div>
+      <div class="dash-count ${m.expectedMismatch ? 'fail' : ''}"><span class="dash-count-value">${m.expectedMismatch || 0}</span><span class="dash-count-label">예상 불일치</span></div>
+    </div>
+    ${warns}
+    <div class="dash-section-title" style="margin-top:12px">샘플 (상위 ${(p.sample || []).length}건)</div>
+    <table class="wiz-table">
+      <thead><tr><th>TC ID</th><th>대표값</th><th>거래소/시트</th><th>환경별</th></tr></thead>
+      <tbody>${sample}</tbody>
+    </table>`;
+  footer.innerHTML = `
+    <button class="btn btn-secondary" onclick="wiz.step=2;renderWizard()">← 이전</button>
+    <button class="btn btn-primary" onclick="wiz.step=4;renderWizard()">다음 →</button>`;
+}
+
+// ④ 취합 실행 — 스냅샷 입력 후 commit
+function renderWizStep4(body, footer) {
+  body.innerHTML = `
+    <div class="form-group">
+      <label>스냅샷/버전 <small>(선택 — 소스 목록에 표시됩니다)</small></label>
+      <input type="text" id="wizSnapshot" class="form-input" placeholder="예: 260721, v3.1">
+    </div>
+    <p class="form-hint">취합 실행 시 ${wiz.preview.items.length}개 입력이 소스로 등록되고 대시보드에 즉시 반영됩니다.</p>`;
+  footer.innerHTML = `
+    <button class="btn btn-secondary" onclick="wiz.step=3;renderWizard()">← 이전</button>
+    <button class="btn btn-primary" id="wizCommitBtn" onclick="runWizCommit()">취합 실행</button>`;
+}
+
+async function runWizCommit() {
+  if (!wiz || !wiz.preview) return;
+  const btn = document.getElementById('wizCommitBtn');
+  if (btn) btn.disabled = true;
+  showLoadingOverlay('취합을 반영하고 있습니다…');
+  const d = await api(`/api/projects/${currentProjectId}/consolidate/commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      stagingId: wiz.preview.stagingId,
+      snapshot: (document.getElementById('wizSnapshot')?.value || '').trim(),
+      uploadedBy: (localStorage.getItem('uploaderName') || '').trim() || undefined,
+    }),
+  });
+  hideLoadingOverlay();
+  if (!d || d.error) {
+    if (btn) btn.disabled = false;
+    showToast('❌ ' + ((d && d.error) || '취합 실패'), 'error');
+    return;
+  }
+  wiz.committed = true;
+  const rows = (d.sources || []).reduce((a, s) => a + (s.rowCount || 0), 0);
+  showToast(`✅ 취합 완료 — 소스 ${(d.sources || []).length}개 · ${rows}행 반영`, 'success');
+  (d.skipped || []).forEach(s => showToast(`⚠️ ${s.file}: ${s.reason}`, 'error'));
+  closeSourceWizard();
+  await loadProjects();
+  renderConsolidated(currentProjectId);
+}
+
+async function deleteSource(id) {
+  if (!confirm('이 소스와 취합된 결과를 삭제하시겠습니까?')) return;
+  const res = await api(`/api/sources/${id}`, { method: 'DELETE' });
+  if (res.error) { showToast('❌ ' + res.error, 'error'); return; }
+  showToast('✅ 소스 삭제됨', 'success');
+  await loadProjects();
+  renderConsolidated(currentProjectId);
 }
 
 function startEditProjectName(projectId, el) {
@@ -818,16 +1521,28 @@ async function uploadFiles() {
   localStorage.setItem('uploaderName', uploaderName);
 
   try {
-    await fetch(`/api/projects/${currentProjectId}/reports`, {
+    const res = await fetch(`/api/projects/${currentProjectId}/reports`, {
       method: 'POST',
       body: formData
     });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.error) throw new Error(d.error || `업로드 실패 (${res.status})`);
 
     selectedFiles = [];
     renderFileList();
     closeModal('uploadModal');
     hideLoadingOverlay();
-    showToast('✅ 업로드 완료', 'success');
+    if (d.consolidated) {
+      // 결과형 프로젝트 — Playwright ZIP 자동 감지·취합 결과 안내
+      const n = (d.sources || []).length;
+      const rowSum = (d.sources || []).reduce((a, s) => a + (s.rowCount || 0), 0);
+      if (n) showToast(`✅ 취합 완료 — 소스 ${n}개 · ${rowSum}행 반영`, 'success');
+      (d.skipped || []).forEach(s => showToast(`⚠️ ${s.file}: ${s.reason}`, 'error'));
+      if (!n && !(d.skipped || []).length) showToast('업로드된 파일이 없습니다', 'error');
+    } else {
+      showToast('✅ 업로드 완료', 'success');
+      (d.notices || []).forEach(m => showToast('💡 ' + m, 'info'));
+    }
     await loadProjects();
     showProjectView(currentProjectId);
   } catch (e) {
@@ -1062,6 +1777,13 @@ function renderDetailPanel(d) {
 
 // ===== Fail 분석 및 결함 후보 (자동 생성 — Fail 있을 때만) =====
 
+// AI 엔드포인트 — 단건 리포트와 취합 뷰(cons-<projectId>)가 같은 UI 를 공유
+function aiEndpoint(id, kind) { // kind: 'chat' | 'fail-analysis'
+  return id.startsWith('cons-')
+    ? `/api/projects/${id.slice(5)}/consolidated/${kind}`
+    : `/api/reports/${id}/${kind}`;
+}
+
 async function loadFailAnalysis(reportId, force) {
   const el = document.getElementById(`fail-analysis-${reportId}`);
   if (!el) return;
@@ -1069,7 +1791,7 @@ async function loadFailAnalysis(reportId, force) {
     <div class="dash-section-title">🔬 Fail 분석 및 결함 후보</div>
     <div class="fa-loading"><div class="loading-spinner-sm"></div> 결함 패턴 분석 중… ${force ? '' : '(첫 분석은 10초 정도 걸립니다)'}</div>`;
   try {
-    const d = await api(`/api/reports/${reportId}/fail-analysis${force ? '?force=1' : ''}`);
+    const d = await api(`${aiEndpoint(reportId, 'fail-analysis')}${force ? '?force=1' : ''}`);
     if (!d || d.disabled || d.none) { el.innerHTML = ''; return; }
     if (d.error) {
       el.innerHTML = `
@@ -1117,9 +1839,13 @@ const AI_PRESET_QUESTIONS = [
 ];
 
 function renderAiSection(reportId) {
+  // 취합 뷰(cons-*) 전용 칩 — AI 호출 없이 프론트가 거래소별 위젯을 직접 렌더
+  const consChips = String(reportId).startsWith('cons-')
+    ? `<button type="button" class="ai-chip" onclick="showExchangeStats('${reportId}')">거래소별 결과 통계</button>`
+    : '';
   const chips = AI_PRESET_QUESTIONS.map(p =>
     `<button type="button" class="ai-chip" data-q="${escapeAttr(p.q)}" onclick="sendAiQuestion('${reportId}', this.dataset.q)">${escapeHtml(p.label)}</button>`
-  ).join('');
+  ).join('') + consChips;
   return `
     <div class="dash-section ai-section">
       <button type="button" class="ai-toggle" onclick="toggleAiPanel('${reportId}')">
@@ -1131,11 +1857,123 @@ function renderAiSection(reportId) {
         <div class="ai-input-row">
           <input type="text" id="ai-input-${reportId}" class="ai-input" maxlength="1000"
             placeholder="이 결과서에 대해 질문하세요... (예: IMPLEMENTED 중 Pass 비율은?)"
-            onkeydown="if(event.key==='Enter'){sendAiQuestion('${reportId}');}">
+            onkeydown="if(event.key==='Enter'&&!event.isComposing&&event.keyCode!==229){sendAiQuestion('${reportId}');}">
           <button type="button" class="btn btn-primary btn-sm" id="ai-send-${reportId}" onclick="sendAiQuestion('${reportId}')">전송</button>
         </div>
       </div>
     </div>`;
+}
+
+// 거래소별 결과 통계 카드 HTML — 채팅 위젯·고정 섹션 공용 (consolidatedData.rows 집계, AI 미호출)
+function buildExchangeCards() {
+  if (!consolidatedData || !consolidatedData.rows) return '';
+  const groups = {};
+  for (const r of consolidatedData.rows) {
+    const ex = r.exchange || '미지정';
+    const g = groups[ex] = groups[ex] || { pass: 0, fail: 0, nt: 0, blocked: 0, suites: {} };
+    if (r.final === 'Pass') g.pass++;
+    else if (r.final === 'Fail') g.fail++;
+    else if (r.final === 'Blocked') g.blocked++;
+    else g.nt++;
+    const suName = r.suite || '기타';
+    const su = g.suites[suName] = g.suites[suName] || { pass: 0, fail: 0, nt: 0 };
+    if (r.final === 'Pass') su.pass++;
+    else if (r.final === 'Fail' || r.final === 'Blocked') su.fail++;
+    else su.nt++;
+  }
+  const names = Object.keys(groups).sort();
+  if (!names.length) return '';
+
+  return names.map(name => {
+    const g = groups[name];
+    const executed = g.pass + g.fail + g.blocked;
+    const total = executed + g.nt;
+    const rate = executed ? Math.round((g.pass / executed) * 100) : 0;
+    const color = rate >= 90 ? '#22c55e' : rate >= 70 ? '#f59e0b' : '#ef4444';
+    const suites = Object.entries(g.suites)
+      .map(([s, v]) => ({ s, ...v, total: v.pass + v.fail + v.nt }))
+      .sort((a, b) => b.total - a.total).slice(0, 6);
+    const suiteRows = suites.map(v => {
+      const seg = (n, cls, t) => n ? `<div class="stack-seg ${cls}" style="width:${((n / v.total) * 100).toFixed(1)}%" title="${t} ${n}건"></div>` : '';
+      return `
+        <div class="exch-suite-row">
+          <span class="exch-suite-label" title="${escapeAttr(v.s)}">${escapeHtml(String(v.s).split('/').pop())}</span>
+          <div class="detail-stack">${seg(v.pass, 'seg-pass', 'Pass')}${seg(v.fail, 'seg-fail', 'Fail')}${seg(v.nt, 'seg-nt', 'N/T')}</div>
+          <span class="exch-suite-counts">${v.pass}/${v.total}</span>
+        </div>`;
+    }).join('');
+    return `
+      <div class="exch-card">
+        <div class="exch-card-head">${escapeHtml(name)}</div>
+        <div class="exch-card-gauge">
+          <div class="dash-rate-circle exch-gauge" style="--rate:${rate}; --color:${color}"><span class="dash-rate-value">${rate}%</span></div>
+          <div class="exch-card-counts">
+            <span class="res-badge res-Pass">P ${g.pass}</span>
+            <span class="res-badge res-Fail">F ${g.fail + g.blocked}</span>
+            <span class="res-badge res-NT">N/T ${g.nt}</span>
+            <span class="exch-total">전체 ${total} · Pass율 ${rate}% (${g.pass}/${executed})</span>
+          </div>
+        </div>
+        ${suiteRows ? `<div class="exch-suites">${suiteRows}</div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+// '거래소별 결과 통계' 칩 — 채팅 영역에 위젯 말풍선 렌더 + 📌 고정 버튼
+function showExchangeStats(reportId) {
+  const cards = buildExchangeCards();
+  if (!cards) { appendAiBubble(reportId, 'assistant', '거래소 정보가 있는 결과가 없습니다.'); return; }
+  appendAiBubble(reportId, 'user', '거래소별 결과 통계');
+  const pinned = (consolidatedData.pinnedWidgets || []).includes('exchangeStats');
+  const pinBtn = pinned
+    ? `<button type="button" class="ai-pin" disabled>✅ 고정됨</button>`
+    : `<button type="button" class="ai-pin" onclick="pinConsWidget('exchangeStats', this)">📌 대시보드에 고정</button>`;
+  appendAiBubble(reportId, 'assistant', `<div class="exch-cards">${cards}</div><div class="exch-pin-row">${pinBtn}</div>`);
+}
+
+// 위젯 고정/해제 — project.pinnedWidgets (서버 저장, 프로젝트 열람자 공유)
+async function pinConsWidget(key, btn) {
+  if (!consProjectId) return;
+  if (btn) btn.disabled = true;
+  const d = await api(`/api/projects/${consProjectId}/widgets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key }),
+  });
+  if (!d || d.error) {
+    if (btn) btn.disabled = false;
+    showToast('❌ ' + ((d && d.error) || '고정 실패'), 'error');
+    return;
+  }
+  consolidatedData.pinnedWidgets = d.pinnedWidgets;
+  if (btn) btn.textContent = '✅ 고정됨';
+  showToast('📌 대시보드에 고정되었습니다', 'success');
+  renderConsPinned();
+}
+
+async function unpinConsWidget(key) {
+  if (!consProjectId) return;
+  if (!confirm('고정된 위젯을 해제할까요?')) return;
+  const d = await api(`/api/projects/${consProjectId}/widgets/${key}`, { method: 'DELETE' });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '해제 실패'), 'error'); return; }
+  consolidatedData.pinnedWidgets = d.pinnedWidgets;
+  renderConsPinned();
+}
+
+// 고정된 위젯 섹션 — 부분 렌더 (AI 대화 DOM 보존을 위해 전체 재렌더 금지)
+function renderConsPinned() {
+  const box = document.getElementById('consPinnedBox');
+  if (!box || !consolidatedData) return;
+  const pinned = consolidatedData.pinnedWidgets || [];
+  if (!pinned.includes('exchangeStats')) { box.innerHTML = ''; return; }
+  const cards = buildExchangeCards();
+  box.innerHTML = cards ? `
+    <div class="dash-panel cons-pinned">
+      <div class="dash-section-title exch-pinned-head">📌 거래소별 결과 통계
+        <button type="button" class="btn-icon-sm" title="고정 해제" onclick="unpinConsWidget('exchangeStats')">✕</button>
+      </div>
+      <div class="exch-cards">${cards}</div>
+    </div>` : '';
 }
 
 function toggleAiPanel(reportId) {
@@ -1191,7 +2029,7 @@ async function sendAiQuestion(reportId, preset) {
 
   let assistantText = '';
   try {
-    const resp = await fetch(`/api/reports/${reportId}/chat`, {
+    const resp = await fetch(aiEndpoint(reportId, 'chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: st.messages }),
@@ -1247,7 +2085,7 @@ function attachAiMetric(reportId, bubble, data) {
   badge.innerHTML = `
     <span class="ai-metric-value">${escapeHtml(data.computed.display)}</span>
     <span class="ai-metric-label">${escapeHtml(data.definition.label)}</span>
-    <button type="button" class="ai-pin" onclick="pinAiMetric('${reportId}', '${token}', this)">📌 대시보드에 추가</button>`;
+    ${reportId.startsWith('cons-') ? '' : `<button type="button" class="ai-pin" onclick="pinAiMetric('${reportId}', '${token}', this)">📌 대시보드에 추가</button>`}`;
   bubble.appendChild(badge);
 }
 
@@ -1412,7 +2250,8 @@ async function createProject() {
   if (!name) return;
 
   const isPrivate = document.getElementById('newProjectPrivate').checked;
-  const body = { name, visibility: isPrivate ? 'private' : 'public' };
+  const typeEl = document.querySelector('input[name="newProjectType"]:checked');
+  const body = { name, visibility: isPrivate ? 'private' : 'public', type: typeEl ? typeEl.value : 'doc' };
   if (newProjectParentId) body.parentId = newProjectParentId;
 
   const result = await api('/api/projects', {
