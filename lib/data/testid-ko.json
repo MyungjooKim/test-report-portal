@@ -1,0 +1,20 @@
+{
+  "modal-order-confirm-container": "모달창 주문 확인 영역",
+  "toast-message-0": "알림 message 0",
+  "order-entry-size-input": "주문 entry 수량 입력창",
+  "global-tooltip": "global tooltip",
+  "modal-advance-tpsl-container": "모달창 advance 익절손절(TP/SL) 영역",
+  "modal-adjust-leverage-confirm-button": "모달창 조정 레버리지 확인 버튼",
+  "order-entry-tab-limit": "주문 entry 탭 지정가",
+  "setting-page-container": "설정 페이지 영역",
+  "modal-setting-nickname-container": "모달창 설정 닉네임 영역",
+  "setting-page-disconnect-Binance": "설정 페이지 disconnect 바이낸스",
+  "performance-exchange-icon-binance": "퍼포먼스 거래소 아이콘 바이낸스",
+  "dashboard-order-history-empty": "대시보드 주문 내역 empty",
+  "dashboard-order-history-execution-price-0": "대시보드 주문 내역 execution 가격 0",
+  "dashboard-order-history-time-0": "대시보드 주문 내역 time 0",
+  "modal-exchange-api-key-container": "모달창 거래소 API 키 영역",
+  "exchange-bar-button": "거래소 bar 버튼",
+  "dashboard-trade-history-empty": "대시보드 거래 내역 empty",
+  "dashboard-container": "대시보드 영역"
+}
