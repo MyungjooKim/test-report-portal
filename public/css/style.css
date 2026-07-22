@@ -1651,9 +1651,9 @@ mark {
 /* 결과 소스 업로드 위저드 (Phase 2) */
 .modal-wide { width: min(760px, 92vw); }
 .wiz-steps { display: flex; align-items: center; gap: 8px; padding: 12px 20px 0; font-size: 12px; color: var(--text-secondary); flex-wrap: wrap; }
-.wiz-step { padding: 3px 10px; border-radius: 12px; background: var(--sidebar-active, #f1f5f9); }
+.wiz-step { padding: 3px 10px; border-radius: 12px; background: #eef2f7; color: #475569; }
 .wiz-step.active { background: #1d4ed8; color: #fff; font-weight: 600; }
-.wiz-step.done { color: #16a34a; }
+.wiz-step.done { background: color-mix(in srgb, #16a34a 12%, #fff); color: #166534; }
 .wiz-sep { color: #cbd5e1; }
 .wiz-item { border: 1px solid #e4e7ec; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
 .wiz-item-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
