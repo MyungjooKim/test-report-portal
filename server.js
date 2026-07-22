@@ -15,6 +15,7 @@ const { computeStatsFromSheetData, collectFailItems } = require('./lib/report-st
 const { computeDetailStats } = require('./lib/detail-stats');
 const pwAdapter = require('./lib/adapters/playwright');
 const manualAdapter = require('./lib/adapters/manual-sheet');
+const { humanizeError } = require('./lib/error-humanize');
 const XLSX = require('xlsx');
 const { consolidate } = require('./lib/consolidate');
 
@@ -917,6 +918,8 @@ app.get('/api/projects/:id/tc-detail', (req, res) => {
     .map(r => ({
       source: r.source, result: r.result, exchange: r.exchange || null, env: r.env || null,
       envResults: r.envResults || null, reason: r.reasonNote || null, naReason: r.naReason || null,
+      humanReason: humanizeError(r.errorDetail || r.reasonNote), // "왜 실패했나요" — 미지 패턴은 null(원문만)
+      errorDetail: r.errorDetail || null,
       title: r.title || null, suite: r.suite || null, sheet: r.sheet || null, flaky: !!r.flaky,
       deepLink: (r.testId && r.reportDirRel)
         ? `${urlPath(`/uploads/${r.reportDirRel}/index.html`)}#?testId=${encodeURIComponent(r.testId)}`

@@ -781,7 +781,13 @@ async function toggleConsDetail(tr) {
           ${rec.title ? `<span class="tcd-title" title="${escapeAttr(rec.title)}">${escapeHtml(rec.title)}</span>` : ''}
           ${rec.deepLink ? `<a class="btn btn-sm tcd-deep" href="${escapeAttr(rec.deepLink)}" target="_blank" onclick="event.stopPropagation()">🎬 영상·트레이스 보기 →</a>` : ''}
         </div>
-        ${rec.reason ? `<div class="tcd-reason">${escapeHtml(rec.reason)}</div>` : ''}
+        ${rec.humanReason ? `
+          <div class="tcd-why">
+            <div class="tcd-why-label">왜 실패했나요</div>
+            <div>${escapeHtml(rec.humanReason)}</div>
+            ${(rec.errorDetail || rec.reason) ? `<details class="tcd-raw"><summary>원본 에러 메시지 보기</summary><pre>${escapeHtml(rec.errorDetail || rec.reason)}</pre></details>` : ''}
+          </div>`
+        : rec.reason ? `<div class="tcd-reason">${escapeHtml(rec.errorDetail || rec.reason)}</div>` : ''}
         ${envChips ? `<div class="tcd-envs">${envChips}</div>` : ''}
         ${imgs ? `<div class="tcd-thumbs">${imgs}</div>` : ''}
       </div>`;
