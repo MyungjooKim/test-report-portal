@@ -2036,24 +2036,30 @@ app.post('/api/projects/:id/consolidated/chat', async (req, res) => {
   await streamSheetChat(res, `${loaded.project.name} — 통합 결과`, consolidatedAsSheetData(loaded.cons), history);
 });
 
-// 취합 Fail 분석 전용 규칙 — 역할별 섹션 없이 주제 중심 단일 문서 (2026-07-22 사용자 확정)
+// 취합 Fail 분석 전용 규칙 — 역할별 섹션 없이 주제 중심 단일 문서 (2026-07-22 사용자 확정,
+// 같은 날 보강: 🎯 핵심 진단·클러스터 표(소계/확인 방법)·우선순위 표(환산 Pass율)·N/T 낙관 편향 주의)
 const CONS_FAIL_ANALYSIS_RULES = `당신은 QA 결함 분석가다. 취합 결과의 Fail 목록과 서버 집계(facts — 정확한 수치)를 받아 분석한다.
 읽는 사람은 QA·개발·기획이 함께다 — 역할별로 섹션을 나누지 말고 모두가 같은 문서를 읽게 한다.
 
 출력 형식 (마크다운, 간결):
+### 🎯 핵심 진단
+- 2줄. ① Fail 중 몇 건(%)이 몇 개 클러스터에 집중되고, 상위 클러스터 해소 시 몇 건 회복·Pass율이 얼마로 오르는지(환산 Pass율 = (facts.현재.Pass + 해소 예상 건수) ÷ facts.현재.실행수 — 반드시 "약/≈, 단순 환산 기준"으로 표기).
+  ② 리스크 축 1~2개 (예: 특정 거래소 편중, N/T 공백 — N/T 가 크면 "실측이 없어 현재 Pass율이 낙관 편향일 수 있음"을 명시).
 ### 집중 영역
 - 2~3줄. Fail·N/T 가 몰린 영역과 품질 하위 영역 — facts 수치만 인용.
-### 결함 클러스터
-- 동일 원인 의심 TC 묶음별 "TC 목록 — 근거 한 줄". facts.요소별_실패_상위 가 있으면 화면 요소 기준으로 묶고 "해소 시 N건 Pass 예상"을 붙인다.
-- 단독 Fail 은 "개별 확인 필요" 한 줄로 모은다.
+### 결함 클러스터 (소계 N건 / 전체 Fail M건)
+- 마크다운 표: | 클러스터 | 건수 | 성격 | 확인 방법 | — facts.요소별_실패_상위 기준으로 묶고,
+  성격은 대표 assertion·의심 원인 한 구, 확인 방법은 개발자가 먼저 볼 지점 한 구.
+- 표 아래 "개별 확인 필요: …" 한 줄 (클러스터에 안 묶이는 단독 Fail).
 ### 확인 필요
-- 불일치(매뉴얼·자동화 상충 → 재검 대상)·flaky·미태그·High 중요도 Fail — 있는 항목만 각 한 줄.
+- 불일치(매뉴얼·자동화 상충 → 재검 대상)·flaky 의심(재검 전 Fail 확정 주의, 재실행 권장)·미태그·High 중요도 Fail — 있는 항목만 각 한 줄.
 ### 커버리지·범위
-- 자동화 미커버 밀집 영역 / 전 거래소 공통 실패(공통 코드 의심) vs 단독 실패(해당 거래소 연동 의심) — 각 한 줄, 데이터 없으면 생략.
-### 수정 우선
-- 1~3개, 영향 범위 큰 순. "무엇을 고치면 몇 건이 풀리는지"를 명시.
+- 자동화 미커버·N/T 밀집 영역(실측 공백 → Pass율 해석 주의) / 전 거래소 공통 실패(공통 코드 의심) vs 단독 실패(해당 거래소 연동 의심) — 각 한 줄, 데이터 없으면 생략.
+### 수정 우선순위
+- 마크다운 표: | 순위 | 조치 | 해소 | 병행 | — 1~3개, 영향 범위 큰 순.
+- 표 아래 한 줄: 상위 항목 해소 시 누적 건수와 환산 Pass율.
 
-규칙: facts 에 없는 수치를 만들지 말 것. 추측은 "의심/가능성"으로 표기. 내용 없는 섹션은 출력하지 않는다. 전체 250단어 이내.`;
+규칙: facts 에 없는 수치를 만들지 말 것(합계·환산만 facts 수치로 계산 가능). 추측은 "의심/가능성"으로 표기. 내용 없는 섹션은 출력하지 않는다. 전체 350단어 이내.`;
 
 // 결정적 집계(facts) — AI 는 해석만, 수치는 전부 서버 계산
 function buildConsAnalysisFacts(projectId, cons) {
@@ -2120,6 +2126,8 @@ function buildConsAnalysisFacts(projectId, cons) {
   }
 
   return {
+    현재: { Pass: cons.stats.byFinal.Pass, Fail: cons.stats.byFinal.Fail, 'N/T': cons.stats.byFinal['N/T'],
+      실행수: cons.stats.executed, Pass율: cons.stats.passRate, 전체TC: cons.stats.totalTc },
     품질_하위_영역: worstSuites,
     NT_밀집_영역: ntSuites,
     불일치: { 건수: mismatches.length, TC: mismatches.slice(0, 20) },
@@ -2143,7 +2151,7 @@ async function generateConsFailAnalysis(projectId, cons, fails, fingerprint) {
   const client = new Anthropic();
   const resp = await client.messages.create({
     model: 'claude-opus-4-8',
-    max_tokens: 2000,
+    max_tokens: 3500, // 표 2개 + thinking 포함 — 2000 에서는 수정 우선순위 표가 잘림
     thinking: { type: 'adaptive' },
     system: CONS_FAIL_ANALYSIS_RULES,
     messages: [{
@@ -2191,8 +2199,8 @@ app.get('/api/projects/:id/consolidated/fail-analysis', async (req, res) => {
   }
 
   const crypto = require('crypto');
-  // |v2: 분석 템플릿 개편(주제 중심 섹션 + facts 주입) — 프롬프트 버전이 바뀌면 캐시 재생성
-  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(fails) + '|v2').digest('hex');
+  // |v3: 핵심 진단·클러스터/우선순위 표·환산 Pass율 보강 — 프롬프트 버전이 바뀌면 캐시 재생성
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify(fails) + '|v3').digest('hex');
   if (req.query.force !== '1' && project.failAnalysis && project.failAnalysis.fingerprint === fingerprint) {
     return res.json({ ok: true, cached: true, ...project.failAnalysis });
   }
