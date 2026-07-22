@@ -526,7 +526,8 @@ function renderConsolidatedBody() {
           <div class="dash-count fail"><span class="dash-count-value">${s.byFinal.Fail}</span><span class="dash-count-label">Fail</span></div>
           <div class="dash-count skip"><span class="dash-count-value">${s.byFinal['N/T']}</span><span class="dash-count-label">N/T</span></div>
           ${s.byFinal.Blocked ? `<div class="dash-count na"><span class="dash-count-value">${s.byFinal.Blocked}</span><span class="dash-count-label">Blocked</span></div>` : ''}
-          <div class="dash-count total" title="Pass + Fail + N/T (N/A 는 모수 제외)"><span class="dash-count-value">${s.totalTc}</span><span class="dash-count-label">전체 TC</span></div>
+          <div class="dash-count total" title="Pass + Fail + N/T (N/A 는 모수 제외) — 거래소별 행 기준"><span class="dash-count-value">${s.totalTc}</span><span class="dash-count-label">전체 TC</span></div>
+          ${s.uniqueTc ? `<div class="dash-count" title="거래소 중복 없는 TC ID 수 (N/A 포함) — 세트 규모"><span class="dash-count-value">${s.uniqueTc}</span><span class="dash-count-label">유니크 TC</span></div>` : ''}
           ${s.byFinal['N/A'] ? `<div class="dash-count na" title="테스트 범위 밖(미개발·불필요 판정) — 지표 계산에서 제외"><span class="dash-count-value">${s.byFinal['N/A']}</span><span class="dash-count-label">범위 제외 N/A</span></div>` : ''}
           ${multi ? `<div class="dash-count ${s.mismatch ? 'fail' : ''}" title="소스 간 결과 불일치"><span class="dash-count-value">${s.mismatch}</span><span class="dash-count-label">불일치</span></div>` : ''}
           ${multi ? covPairs.map(([src, v]) => `<div class="dash-count"><span class="dash-count-value">${v}%</span><span class="dash-count-label">${escapeHtml(src)} 커버리지</span></div>`).join('') : ''}
