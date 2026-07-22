@@ -7,7 +7,6 @@ let selectedFiles = [];
 // ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
   setupUploadZone();
-  setupSourceZone();
   initSidebarResize();
   initQaLauncher();
 
@@ -413,8 +412,8 @@ async function showProjectView(id) {
 
   // 유형 분기 (§4): 결과형 = 취합 대시보드, 문서형 = 리포트 목록(현행)
   const isResult = project && project.type === 'result';
-  // 결과형에서도 리포트 업로드(파일 탭) 사용 가능 — 서버가 Playwright ZIP을 자동 감지해 취합 소스로 등록
-  document.getElementById('btnUploadReport').style.display = '';
+  // 결과형은 업로드 진입점 단일화(§8 위저드) — 문서형만 리포트 업로드 노출
+  document.getElementById('btnUploadReport').style.display = isResult ? 'none' : '';
   document.getElementById('btnUploadSource').style.display = isResult ? '' : 'none';
   document.getElementById('btnRefreshConsolidated').style.display = isResult ? '' : 'none';
   document.getElementById('dateGroups').style.display = isResult ? 'none' : '';
@@ -527,7 +526,8 @@ function renderConsolidatedBody() {
           <div class="dash-count fail"><span class="dash-count-value">${s.byFinal.Fail}</span><span class="dash-count-label">Fail</span></div>
           <div class="dash-count skip"><span class="dash-count-value">${s.byFinal['N/T']}</span><span class="dash-count-label">N/T</span></div>
           ${s.byFinal.Blocked ? `<div class="dash-count na"><span class="dash-count-value">${s.byFinal.Blocked}</span><span class="dash-count-label">Blocked</span></div>` : ''}
-          <div class="dash-count total" title="Pass + Fail + N/T"><span class="dash-count-value">${s.totalTc}</span><span class="dash-count-label">전체 TC</span></div>
+          <div class="dash-count total" title="Pass + Fail + N/T (N/A 는 모수 제외)"><span class="dash-count-value">${s.totalTc}</span><span class="dash-count-label">전체 TC</span></div>
+          ${s.byFinal['N/A'] ? `<div class="dash-count na" title="테스트 범위 밖(미개발·불필요 판정) — 지표 계산에서 제외"><span class="dash-count-value">${s.byFinal['N/A']}</span><span class="dash-count-label">범위 제외 N/A</span></div>` : ''}
           ${multi ? `<div class="dash-count ${s.mismatch ? 'fail' : ''}" title="소스 간 결과 불일치"><span class="dash-count-value">${s.mismatch}</span><span class="dash-count-label">불일치</span></div>` : ''}
           ${multi ? covPairs.map(([src, v]) => `<div class="dash-count"><span class="dash-count-value">${v}%</span><span class="dash-count-label">${escapeHtml(src)} 커버리지</span></div>`).join('') : ''}
         </div>
@@ -587,7 +587,7 @@ function renderConsAxes() {
   if (!axesBox || !reasonsBox) return;
 
   const axesGroups = (data.axes || []).map(ax => {
-    const rows = ax.values.map(v => consStackRow(ax.key, v)).join('');
+    const rows = ax.values.map(v => consStackRow(ax.key, v, ax.filterable !== false)).join('');
     return rows ? `<div class="detail-group"><div class="dash-section-title">${escapeHtml(ax.name)}</div>${rows}</div>` : '';
   }).join('');
   axesBox.innerHTML = axesGroups ? `
@@ -626,6 +626,7 @@ function renderConsFilters() {
   if (consAxisFilter) chips.push(`<span class="cons-chip" onclick="setConsAxisFilter('${escapeAttr(consAxisFilter.key)}','${escapeAttr(consAxisFilter.value)}')" title="필터 해제">${escapeHtml(consAxisFilter.value)} ✕</span>`);
   if (consReasonFilter !== null && reasons[consReasonFilter]) chips.push(`<span class="cons-chip" onclick="setConsReasonFilter(${consReasonFilter})" title="필터 해제">${escapeHtml(reasons[consReasonFilter].pattern)} ✕</span>`);
   const filterKeys = multi ? [['all','전체'],['fail','Fail'],['mismatch','불일치'],['nt','N/T']] : [['all','전체'],['fail','Fail'],['nt','N/T']];
+  if (data.stats && data.stats.byFinal && data.stats.byFinal['N/A']) filterKeys.push(['na', 'N/A']);
   box.innerHTML = `
     <div class="cons-filters">
       ${filterKeys.map(([k,label]) =>
@@ -637,7 +638,7 @@ function renderConsFilters() {
 }
 
 // 축별 분포 스택 바 한 줄 (기존 renderStackRow와 동일 문법 + 클릭 필터)
-function consStackRow(axKey, v) {
+function consStackRow(axKey, v, filterable = true) {
   const denom = v.total + (v.na || 0);
   if (!denom) return '';
   const seg = (n, cls, title) => n ? `<div class="stack-seg ${cls}" style="width:${((n / denom) * 100).toFixed(1)}%" title="${title} ${n}건"></div>` : '';
@@ -648,7 +649,7 @@ function consStackRow(axKey, v) {
     v.na ? `없음 ${v.na}` : '',
   ].filter(Boolean).join(' · ');
   const active = consAxisFilter && consAxisFilter.key === axKey && consAxisFilter.value === v.value;
-  const clickable = !/^기타 \(/.test(String(v.value)); // suite '기타' 합산 행은 필터 불가
+  const clickable = filterable && !/^기타 \(/.test(String(v.value)); // 환경축·'기타' 합산 행은 필터 불가
   return `
     <div class="detail-row ${clickable ? 'cons-click-row' : ''} ${active ? 'active' : ''}"
          ${clickable ? `onclick="setConsAxisFilter('${escapeAttr(axKey)}','${escapeAttr(v.value)}')" title="클릭하면 아래 표를 필터링합니다"` : ''}>
@@ -687,6 +688,7 @@ function renderConsTable() {
   if (consolidatedFilter === 'fail') rows = rows.filter(r => r.final === 'Fail');
   else if (consolidatedFilter === 'mismatch') rows = rows.filter(r => r.mismatch);
   else if (consolidatedFilter === 'nt') rows = rows.filter(r => r.final === 'N/T');
+  else if (consolidatedFilter === 'na') rows = rows.filter(r => r.final === 'N/A');
   if (consAxisFilter) {
     const { key, value } = consAxisFilter;
     if (key === 'exchange') rows = rows.filter(r => r.exchange === value);
@@ -701,6 +703,13 @@ function renderConsTable() {
 
   const hasExch = consolidatedData.rows.some(r => r.exchange);
   const badge = (v) => `<span class="res-badge res-${v.replace('/','')}">${v}</span>`;
+  // 매뉴얼 셀은 환경×테스터 원본(D3 보존)을 툴팁으로 노출
+  const cellHtml = (cell) => {
+    if (!cell) return '<span class="res-empty">–</span>';
+    const tip = (cell.envResults || []).map(e => `${e.env}: ${e.result}`).join('\n');
+    return `<span ${tip ? `title="${escapeAttr(tip)}"` : ''}>${badge(cell.result)}</span>`
+      + (cell.flaky ? ' <span class="flaky" title="flaky">⚡</span>' : '');
+  };
   const capped = rows.slice(0, 1000);
 
   wrap.innerHTML = `
@@ -716,7 +725,7 @@ function renderConsTable() {
           <tr class="${r.mismatch ? 'row-mismatch' : ''}">
             <td class="tc-id">${escapeHtml(r.tcId)}</td>
             ${hasExch ? `<td>${escapeHtml(r.exchange || '')}</td>` : ''}
-            ${sources.map(s => `<td>${r.sources[s] ? badge(r.sources[s].result) + (r.sources[s].flaky ? ' <span class="flaky" title="flaky">⚡</span>' : '') : '<span class="res-empty">–</span>'}</td>`).join('')}
+            ${sources.map(s => `<td>${cellHtml(r.sources[s])}</td>`).join('')}
             <td>${badge(r.final)}${r.mismatch ? ' <span class="mismatch-tag" title="소스 간 결과 불일치">⚠</span>' : ''}</td>
             <td class="reason">${escapeHtml(firstReason(r) || '')}</td>
           </tr>`).join('')}
@@ -729,62 +738,227 @@ function firstReason(r) {
   return null;
 }
 
-// ===== 결과 소스 업로드 =====
-let selectedSourceFiles = [];
+// ===== 결과 소스 업로드 위저드 (Phase 2 — §11: ①양식 감지 → ②매핑 확인 → ③미리보기 → ④취합) =====
+let wiz = null; // { step, files, gsheetUrl, preview, committed }
 
-function setupSourceZone() {
-  const zone = document.getElementById('sourceZone');
-  const input = document.getElementById('sourceFileInput');
+const WIZ_STEPS = ['파일/양식', '매핑 확인', '미리보기', '취합 실행'];
+
+function openSourceModal() {
+  wiz = { step: 1, files: [], gsheetUrl: '', preview: null, committed: false };
+  renderWizard();
+  openModal('sourceModal');
+}
+
+function closeSourceWizard() {
+  // 미커밋 스테이징 정리 (수용기준: 취소 시 DB 무변화)
+  if (wiz && wiz.preview && !wiz.committed) {
+    api(`/api/consolidate/staging/${wiz.preview.stagingId}`, { method: 'DELETE' });
+  }
+  wiz = null;
+  closeModal('sourceModal');
+}
+
+function renderWizard() {
+  if (!wiz) return;
+  document.getElementById('wizSteps').innerHTML = WIZ_STEPS.map((label, i) =>
+    `<span class="wiz-step ${wiz.step === i + 1 ? 'active' : ''} ${wiz.step > i + 1 ? 'done' : ''}">${i + 1}. ${label}</span>`
+  ).join('<span class="wiz-sep">→</span>');
+  const body = document.getElementById('wizBody');
+  const footer = document.getElementById('wizFooter');
+  if (wiz.step === 1) { renderWizStep1(body, footer); }
+  else if (wiz.step === 2) { renderWizStep2(body, footer); }
+  else if (wiz.step === 3) { renderWizStep3(body, footer); }
+  else { renderWizStep4(body, footer); }
+}
+
+// ① 파일/양식 — 파일 드롭(ZIP/XLSX/CSV) 또는 Google Sheets URL, 양식은 서버가 자동 감지
+function renderWizStep1(body, footer) {
+  body.innerHTML = `
+    <div class="upload-zone" id="wizZone">
+      <div class="upload-zone-content">
+        <div class="upload-icon">📊</div>
+        <p>결과 파일을 드래그하거나 클릭하여 선택</p>
+        <span class="upload-hint">🤖 Playwright 리포트 ZIP · 📋 매뉴얼 결과 XLSX/CSV — 양식은 자동 감지됩니다</span>
+      </div>
+      <input type="file" id="wizFileInput" multiple accept=".zip,.xlsx,.xls,.csv" hidden>
+    </div>
+    <div class="upload-file-list" id="wizFileList"></div>
+    <div class="form-group" style="margin-top:12px">
+      <label>또는 Google Sheets URL <small>(매뉴얼 결과 시트)</small></label>
+      <input type="text" id="wizGsheetUrl" class="form-input" placeholder="https://docs.google.com/spreadsheets/d/…"
+        value="${escapeAttr(wiz.gsheetUrl)}" oninput="wiz.gsheetUrl=this.value.trim(); renderWizFooter1()">
+    </div>`;
+  footer.innerHTML = '';
+  renderWizFileList();
+  renderWizFooter1();
+  bindWizZone();
+}
+
+function renderWizFooter1() {
+  const ready = wiz.files.length > 0 || wiz.gsheetUrl;
+  document.getElementById('wizFooter').innerHTML = `
+    <button class="btn btn-secondary" onclick="closeSourceWizard()">취소</button>
+    <button class="btn btn-primary" onclick="runWizPreview()" ${ready ? '' : 'disabled'}>분석 →</button>`;
+}
+
+function bindWizZone() {
+  const zone = document.getElementById('wizZone');
+  const input = document.getElementById('wizFileInput');
   if (!zone || !input) return;
+  const ACCEPT = /\.(zip|xlsx|xls|csv)$/i;
   zone.addEventListener('click', () => input.click());
   zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
   zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
   zone.addEventListener('drop', (e) => {
     e.preventDefault(); zone.classList.remove('dragover');
-    addSourceFiles(Array.from(e.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.zip')));
+    wiz.files.push(...Array.from(e.dataTransfer.files).filter(f => ACCEPT.test(f.name)));
+    renderWizFileList(); renderWizFooter1();
   });
-  input.addEventListener('change', () => { addSourceFiles(Array.from(input.files)); input.value = ''; });
+  input.addEventListener('change', () => {
+    wiz.files.push(...Array.from(input.files)); input.value = '';
+    renderWizFileList(); renderWizFooter1();
+  });
 }
 
-function openSourceModal() {
-  selectedSourceFiles = [];
-  renderSourceFileList();
-  document.getElementById('sourceSnapshot').value = '';
-  openModal('sourceModal');
+function renderWizFileList() {
+  const el = document.getElementById('wizFileList');
+  if (!el) return;
+  el.innerHTML = wiz.files.map((f, i) => `
+    <div class="upload-file-item"><span>${/\.zip$/i.test(f.name) ? '🤖' : '📋'}</span>
+    <span class="file-name">${escapeHtml(f.name)}</span>
+    <button class="file-remove" onclick="wiz.files.splice(${i},1);renderWizFileList();renderWizFooter1()">✕</button></div>`).join('');
 }
 
-function addSourceFiles(files) { selectedSourceFiles = [...selectedSourceFiles, ...files]; renderSourceFileList(); }
-function removeSourceFile(i) { selectedSourceFiles.splice(i, 1); renderSourceFileList(); }
-function renderSourceFileList() {
-  document.getElementById('sourceFileList').innerHTML = selectedSourceFiles.map((f, i) => `
-    <div class="upload-file-item"><span>📊</span><span class="file-name">${escapeHtml(f.name)}</span>
-    <button class="file-remove" onclick="removeSourceFile(${i})">✕</button></div>`).join('');
-}
-
-async function uploadSources() {
-  if (!currentProjectId || selectedSourceFiles.length === 0) { showToast('ZIP 파일을 선택하세요.', 'error'); return; }
-  showLoadingOverlay('결과를 취합하고 있습니다…');
+async function runWizPreview() {
+  if (!currentProjectId || !wiz) return;
+  showLoadingOverlay('양식을 감지하고 파싱하고 있습니다…');
   const formData = new FormData();
-  for (const f of selectedSourceFiles) formData.append('files', f);
-  formData.append('snapshot', document.getElementById('sourceSnapshot').value.trim());
-  formData.append('sourceRole', 'automation');
-  const uploaderName = (document.getElementById('uploaderName')?.value || '').trim() || '익명';
-  formData.append('uploadedBy', uploaderName);
+  for (const f of wiz.files) formData.append('files', f);
+  if (wiz.gsheetUrl) formData.append('gsheetUrl', wiz.gsheetUrl);
   try {
-    const res = await fetch(`/api/projects/${currentProjectId}/sources`, { method: 'POST', body: formData });
-    const data = await res.json();
+    const res = await fetch(`/api/projects/${currentProjectId}/consolidate/preview`, { method: 'POST', body: formData });
+    const d = await res.json();
     hideLoadingOverlay();
-    if (data.error) { showToast('❌ ' + data.error, 'error'); return; }
-    closeModal('sourceModal');
-    const added = (data.sources || []).length, skipped = (data.skipped || []).length;
-    showToast(`✅ 소스 ${added}건 취합${skipped ? ` · ${skipped}건 제외` : ''}`, 'success');
-    if (skipped) console.warn('취합 제외:', data.skipped);
-    await loadProjects();
-    renderConsolidated(currentProjectId);
+    if (!res.ok || d.error) {
+      showToast('❌ ' + (d.error || `분석 실패 (${res.status})`), 'error');
+      (d.skipped || []).forEach(s => showToast(`⚠️ ${s.file}: ${s.reason}`, 'error'));
+      return;
+    }
+    wiz.preview = d;
+    wiz.step = 2;
+    renderWizard();
   } catch (e) {
     hideLoadingOverlay();
-    showToast('❌ 취합 실패: ' + e.message, 'error');
+    showToast('❌ 분석 실패: ' + e.message, 'error');
   }
+}
+
+// ② 매핑 확인 — 감지된 양식·시트·컬럼 표시 (D2: 선택 UI 없음, 확인만)
+function renderWizStep2(body, footer) {
+  const p = wiz.preview;
+  const itemHtml = p.items.map(item => {
+    const isPw = item.kind === 'playwright';
+    const sheets = (item.detected.sheets || []).map(s => `
+      <tr class="${s.adopted ? '' : 'wiz-excluded'}">
+        <td>${escapeHtml(s.name)}</td>
+        <td>${s.adopted ? `✓ ${s.rowCount}행` : `배제 — ${escapeHtml(s.reason || '')}`}</td>
+        <td>${s.adopted ? escapeHtml(isPw ? (s.exchange || '자동') : (s.resultLabels || []).join(', ')) : ''}</td>
+      </tr>`).join('');
+    return `
+      <div class="wiz-item">
+        <div class="wiz-item-head">
+          <span class="src-badge src-${isPw ? 'automation' : 'manual'}">${isPw ? '🤖 Playwright (자동화)' : `📋 매뉴얼 (${escapeHtml(item.format)})`}</span>
+          <span class="file-name">${escapeHtml(item.filename)}</span>
+          <span class="src-meta">${item.detected.rowCount}건 인식</span>
+        </div>
+        <table class="wiz-table">
+          <thead><tr><th>${isPw ? '리포트 폴더' : '시트'}</th><th>인식</th><th>${isPw ? '거래소' : '결과 컬럼 (환경×테스터)'}</th></tr></thead>
+          <tbody>${sheets}</tbody>
+        </table>
+      </div>`;
+  }).join('');
+  body.innerHTML = itemHtml + ((wiz.preview.skipped || []).length
+    ? `<div class="wiz-warn">⚠️ 제외: ${wiz.preview.skipped.map(s => `${escapeHtml(s.file)} (${escapeHtml(s.reason)})`).join(' · ')}</div>` : '');
+  footer.innerHTML = `
+    <button class="btn btn-secondary" onclick="wizBackToInput()">← 다시 선택</button>
+    <button class="btn btn-primary" onclick="wiz.step=3;renderWizard()">다음 →</button>`;
+}
+
+function wizBackToInput() {
+  if (wiz.preview) api(`/api/consolidate/staging/${wiz.preview.stagingId}`, { method: 'DELETE' });
+  wiz.preview = null;
+  wiz.step = 1;
+  renderWizard();
+}
+
+// ③ 미리보기 — 기존 TC 매칭·신규·예상 불일치 + 프리픽스(플랫폼) 경고 + 샘플
+function renderWizStep3(body, footer) {
+  const p = wiz.preview;
+  const m = p.matchPreview || {};
+  const warns = (p.warnings || []).map(w => `<div class="wiz-warn">⚠️ ${escapeHtml(w)}</div>`).join('');
+  const sample = (p.sample || []).map(r => `
+    <tr><td class="tc-id">${escapeHtml(r.tcId)}</td>
+      <td><span class="res-badge res-${String(r.result).replace('/', '')}">${escapeHtml(r.result)}</span></td>
+      <td>${escapeHtml(r.exchange || r.sheet || '')}</td>
+      <td>${(r.envResults || []).map(e => `${escapeHtml(e.env)}: ${escapeHtml(e.result)}`).join(' · ')}</td></tr>`).join('');
+  body.innerHTML = `
+    <div class="dash-counts wiz-match">
+      <div class="dash-count"><span class="dash-count-value">${m.existingTcCount || 0}</span><span class="dash-count-label">기존 TC</span></div>
+      <div class="dash-count pass"><span class="dash-count-value">${m.matched || 0}</span><span class="dash-count-label">매칭</span></div>
+      <div class="dash-count"><span class="dash-count-value">${m.newTc || 0}</span><span class="dash-count-label">신규 TC</span></div>
+      <div class="dash-count ${m.expectedMismatch ? 'fail' : ''}"><span class="dash-count-value">${m.expectedMismatch || 0}</span><span class="dash-count-label">예상 불일치</span></div>
+    </div>
+    ${warns}
+    <div class="dash-section-title" style="margin-top:12px">샘플 (상위 ${(p.sample || []).length}건)</div>
+    <table class="wiz-table">
+      <thead><tr><th>TC ID</th><th>대표값</th><th>거래소/시트</th><th>환경별</th></tr></thead>
+      <tbody>${sample}</tbody>
+    </table>`;
+  footer.innerHTML = `
+    <button class="btn btn-secondary" onclick="wiz.step=2;renderWizard()">← 이전</button>
+    <button class="btn btn-primary" onclick="wiz.step=4;renderWizard()">다음 →</button>`;
+}
+
+// ④ 취합 실행 — 스냅샷 입력 후 commit
+function renderWizStep4(body, footer) {
+  body.innerHTML = `
+    <div class="form-group">
+      <label>스냅샷/버전 <small>(선택 — 소스 목록에 표시됩니다)</small></label>
+      <input type="text" id="wizSnapshot" class="form-input" placeholder="예: 260721, v3.1">
+    </div>
+    <p class="form-hint">취합 실행 시 ${wiz.preview.items.length}개 입력이 소스로 등록되고 대시보드에 즉시 반영됩니다.</p>`;
+  footer.innerHTML = `
+    <button class="btn btn-secondary" onclick="wiz.step=3;renderWizard()">← 이전</button>
+    <button class="btn btn-primary" id="wizCommitBtn" onclick="runWizCommit()">취합 실행</button>`;
+}
+
+async function runWizCommit() {
+  if (!wiz || !wiz.preview) return;
+  const btn = document.getElementById('wizCommitBtn');
+  if (btn) btn.disabled = true;
+  showLoadingOverlay('취합을 반영하고 있습니다…');
+  const d = await api(`/api/projects/${currentProjectId}/consolidate/commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      stagingId: wiz.preview.stagingId,
+      snapshot: (document.getElementById('wizSnapshot')?.value || '').trim(),
+      uploadedBy: (localStorage.getItem('uploaderName') || '').trim() || undefined,
+    }),
+  });
+  hideLoadingOverlay();
+  if (!d || d.error) {
+    if (btn) btn.disabled = false;
+    showToast('❌ ' + ((d && d.error) || '취합 실패'), 'error');
+    return;
+  }
+  wiz.committed = true;
+  const rows = (d.sources || []).reduce((a, s) => a + (s.rowCount || 0), 0);
+  showToast(`✅ 취합 완료 — 소스 ${(d.sources || []).length}개 · ${rows}행 반영`, 'success');
+  (d.skipped || []).forEach(s => showToast(`⚠️ ${s.file}: ${s.reason}`, 'error'));
+  closeSourceWizard();
+  await loadProjects();
+  renderConsolidated(currentProjectId);
 }
 
 async function deleteSource(id) {

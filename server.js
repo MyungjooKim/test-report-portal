@@ -14,6 +14,8 @@ const { evaluateMetric } = require('./lib/metric-eval');
 const { computeStatsFromSheetData, collectFailItems } = require('./lib/report-stats');
 const { computeDetailStats } = require('./lib/detail-stats');
 const pwAdapter = require('./lib/adapters/playwright');
+const manualAdapter = require('./lib/adapters/manual-sheet');
+const XLSX = require('xlsx');
 const { consolidate } = require('./lib/consolidate');
 
 require('dotenv').config();
@@ -144,6 +146,7 @@ function loadDB() {
   // 결과 취합용 컬렉션 (레거시 DB 호환 — 없으면 초기화)
   if (!Array.isArray(db.sources)) db.sources = [];
   if (!Array.isArray(db.records)) db.records = [];
+  if (!Array.isArray(db.staging)) db.staging = []; // 취합 미리보기 스테이징 (Phase 2, TTL 24h)
   return db;
 }
 
@@ -172,6 +175,17 @@ const upload = multer({
     } else {
       cb(new Error('HTML, ZIP, MD 또는 MMD/Mermaid 파일만 업로드 가능합니다.'));
     }
+  },
+  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 }
+});
+
+// 취합 preview 전용 업로더 — 결과 소스 양식(ZIP/XLSX/CSV)만 허용 (Phase 2)
+const uploadConsolidate = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (['.zip', '.xlsx', '.xls', '.csv'].includes(ext)) cb(null, true);
+    else cb(new Error('ZIP(Playwright), XLSX/CSV(매뉴얼) 파일만 업로드 가능합니다.'));
   },
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 }
 });
@@ -945,6 +959,252 @@ app.delete('/api/projects/:id/widgets/:key', (req, res) => {
   project.pinnedWidgets = (project.pinnedWidgets || []).filter(k => k !== req.params.key);
   saveDB(db);
   res.json({ success: true, pinnedWidgets: project.pinnedWidgets });
+});
+
+// ──────────── 취합 preview / commit (Phase 2 — 스펙 §10, 설계 §7) ────────────
+// 미리보기 없이 저장되는 경로 없음: preview 는 파싱·스테이징만, commit 이 확정 저장.
+
+const STAGING_TTL_MS = 24 * 60 * 60 * 1000;
+
+function cleanStaging(db) {
+  const now = Date.now();
+  const expired = db.staging.filter(s => now - new Date(s.createdAt).getTime() > STAGING_TTL_MS);
+  for (const s of expired) {
+    for (const item of s.items || []) {
+      for (const rel of item.cleanupDirs || []) rmDir(path.join(REPORTS_DIR, rel));
+    }
+  }
+  if (expired.length) db.staging = db.staging.filter(s => !expired.includes(s));
+}
+
+// 기존 레코드와 TC ID 대조 — 매칭·신규·예상 불일치 + 프리픽스(플랫폼) 경고 (D4)
+function buildMatchPreview(db, projectId, newRecords) {
+  const DEC = new Set(['Pass', 'Fail', 'Blocked']);
+  const existingByTc = new Map();
+  for (const r of db.records.filter(r => r.projectId === projectId && r.tcId)) {
+    if (!existingByTc.has(r.tcId)) existingByTc.set(r.tcId, []);
+    existingByTc.get(r.tcId).push(r);
+  }
+
+  const newTcSet = new Set(newRecords.map(r => r.tcId).filter(Boolean));
+  let matched = 0, newTc = 0, expectedMismatch = 0;
+  for (const tcId of newTcSet) {
+    if (existingByTc.has(tcId)) matched++;
+    else newTc++;
+  }
+  for (const rec of newRecords) {
+    if (!DEC.has(rec.result)) continue;
+    const olds = existingByTc.get(rec.tcId);
+    if (olds && olds.some(o => DEC.has(o.result) && o.result !== rec.result)) expectedMismatch++;
+  }
+
+  const warnings = [];
+  const prefixOf = id => (String(id).match(/^([A-Z]+)-/) || [])[1];
+  const oldPrefixes = new Set([...existingByTc.keys()].map(prefixOf).filter(Boolean));
+  const newPrefixes = new Set([...newTcSet].map(prefixOf).filter(Boolean));
+  if (oldPrefixes.size && newPrefixes.size && ![...newPrefixes].some(p => oldPrefixes.has(p))) {
+    warnings.push(`TC ID 체계가 기존(${[...oldPrefixes].join(', ')}-)과 다릅니다(${[...newPrefixes].join(', ')}-). 플랫폼이 다른 파일일 수 있어요 — 매칭 0건이 예상됩니다.`);
+  }
+  return { matched, newTc, expectedMismatch, existingTcCount: existingByTc.size, warnings };
+}
+
+// XLSX/CSV 파일 → allData({시트명: rows[][]})
+function readSpreadsheetFile(filePath) {
+  const wb = XLSX.readFile(filePath, { raw: false });
+  const allData = {};
+  for (const name of wb.SheetNames) {
+    allData[name] = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '' });
+  }
+  return allData;
+}
+
+app.post('/api/projects/:id/consolidate/preview', uploadConsolidate.array('files', 20), async (req, res) => {
+  const db = loadDB();
+  cleanStaging(db);
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  if (project.type !== 'result') return res.status(400).json({ error: '결과형 프로젝트에서만 취합할 수 있습니다.' });
+
+  const items = [];
+  const skipped = [];
+
+  // 1) 파일 입력 — ZIP(Playwright) / XLSX·CSV(매뉴얼) 자동 감지 (§11 ① 양식 감지)
+  for (const file of req.files || []) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+
+    if (ext === '.zip') {
+      const { extractDir } = extractZip(path.join(REPORTS_DIR, file.filename));
+      const rootAbs = path.join(REPORTS_DIR, extractDir);
+      const dirs = findPlaywrightDirs(rootAbs, extractDir);
+      if (!dirs.length) {
+        skipped.push({ file: originalName, reason: 'Playwright 리포트로 인식되지 않음(임베드 report.json 없음)' });
+        rmDir(rootAbs);
+        continue;
+      }
+      const records = [];
+      const sheets = [];
+      for (const d of dirs) {
+        try {
+          const parsed = pwAdapter.parse(d.abs, {});
+          records.push(...parsed.rows);
+          sheets.push({ name: d.name || originalName, adopted: true, rowCount: parsed.rows.length, exchange: parsed.detected.exchange || null });
+        } catch (e) {
+          sheets.push({ name: d.name || originalName, adopted: false, reason: `파싱 실패: ${e.message}` });
+        }
+      }
+      items.push({
+        kind: 'playwright', filename: originalName.replace(/\.zip$/i, ''), format: 'playwright',
+        dirs: dirs.map(d => ({ rel: d.rel, name: d.name })),
+        detected: { format: 'playwright', sheets, rowCount: records.length },
+        cleanupDirs: [extractDir],
+        _records: records, // 매치 미리보기용 — 스테이징에는 저장하지 않음(커밋 시 재파싱)
+      });
+    } else if (ext === '.xlsx' || ext === '.xls' || ext === '.csv') {
+      let allData;
+      try {
+        allData = readSpreadsheetFile(path.join(REPORTS_DIR, file.filename));
+      } catch (e) {
+        skipped.push({ file: originalName, reason: `파일 파싱 실패: ${e.message}` });
+        continue;
+      } finally {
+        try { fs.unlinkSync(path.join(REPORTS_DIR, file.filename)); } catch (_) { /* 원본 불필요 */ }
+      }
+      if (!manualAdapter.supports(allData)) {
+        skipped.push({ file: originalName, reason: 'TC ID·결과 컬럼을 감지하지 못함' });
+        continue;
+      }
+      const parsed = manualAdapter.parse(allData);
+      items.push({
+        kind: 'manual', filename: originalName.replace(/\.(xlsx|xls|csv)$/i, ''), format: ext.slice(1),
+        records: parsed.rows, detected: parsed.detected, cleanupDirs: [], _records: parsed.rows,
+      });
+    } else {
+      skipped.push({ file: originalName, reason: 'ZIP(Playwright)·XLSX·CSV 만 지원' });
+    }
+  }
+
+  // 2) Google Sheets URL 입력 (매뉴얼)
+  const gsheetUrl = req.body && req.body.gsheetUrl && String(req.body.gsheetUrl).trim();
+  if (gsheetUrl) {
+    const oauth2Client = await getGoogleAuthForRequest(req);
+    const idMatch = gsheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    const spreadsheetId = idMatch ? idMatch[1] : (/^[a-zA-Z0-9-_]+$/.test(gsheetUrl) ? gsheetUrl : null);
+    if (!oauth2Client) {
+      skipped.push({ file: gsheetUrl, reason: 'Google 로그인이 필요합니다.' });
+    } else if (!spreadsheetId) {
+      skipped.push({ file: gsheetUrl, reason: '유효한 Google Spreadsheet URL/ID 가 아닙니다.' });
+    } else {
+      try {
+        const sheetsApi = google.sheets({ version: 'v4', auth: oauth2Client });
+        const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+        const title = meta.data.properties.title;
+        const allData = {};
+        for (const s of meta.data.sheets) {
+          const name = s.properties.title;
+          try {
+            const r = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: `'${name}'` });
+            allData[name] = r.data.values || [];
+          } catch (_) { allData[name] = []; }
+        }
+        if (!manualAdapter.supports(allData)) {
+          skipped.push({ file: title, reason: 'TC ID·결과 컬럼을 감지하지 못함' });
+        } else {
+          const parsed = manualAdapter.parse(allData);
+          items.push({
+            kind: 'manual', filename: title, format: 'gsheet', gsheetUrl,
+            records: parsed.rows, detected: parsed.detected, cleanupDirs: [], _records: parsed.rows,
+          });
+        }
+      } catch (e) {
+        skipped.push({ file: gsheetUrl, reason: `Google Sheets 읽기 실패: ${e.message}` });
+      }
+    }
+  }
+
+  if (!items.length) {
+    return res.status(400).json({ error: '취합 가능한 입력이 없습니다.', skipped });
+  }
+
+  const allNewRecords = items.flatMap(i => i._records);
+  const matchPreview = buildMatchPreview(db, project.id, allNewRecords);
+  const sample = allNewRecords.slice(0, 10).map(r => ({
+    tcId: r.tcId, result: r.result, exchange: r.exchange || null,
+    sheet: r.sheet || r.suite || null, envResults: r.envResults || undefined,
+  }));
+
+  const stagingId = uuidv4();
+  db.staging.push({
+    id: stagingId, projectId: project.id, createdAt: new Date().toISOString(),
+    items: items.map(({ _records, ...item }) => item), // playwright 는 dirs 만 보관(커밋 시 재파싱)
+  });
+  saveDB(db);
+
+  res.json({
+    stagingId,
+    items: items.map(i => ({ kind: i.kind, filename: i.filename, format: i.format, detected: i.detected })),
+    matchPreview,
+    warnings: matchPreview.warnings,
+    skipped,
+    sample,
+  });
+});
+
+app.post('/api/projects/:id/consolidate/commit', (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  const st = db.staging.find(s => s.id === (req.body && req.body.stagingId) && s.projectId === project.id);
+  if (!st) return res.status(404).json({ error: '스테이징을 찾을 수 없습니다(만료되었을 수 있음). 다시 업로드해 주세요.' });
+
+  const snapshot = (req.body.snapshot || '').trim() || null;
+  const uploadedBy = req.body.uploadedBy || (req.session.googleUser && req.session.googleUser.email) || '익명';
+  const addedSources = [];
+  const skipped = [];
+
+  for (const item of st.items) {
+    if (item.kind === 'playwright') {
+      const dirs = (item.dirs || []).map(d => ({ abs: path.join(REPORTS_DIR, d.rel), rel: d.rel, name: d.name }));
+      const r = registerPlaywrightDirs(db, project, dirs, {
+        snapshot, uploadedBy, fallbackName: item.filename, sourceRole: 'automation',
+      });
+      addedSources.push(...r.addedSources);
+      skipped.push(...r.skipped);
+    } else {
+      const sourceId = uuidv4();
+      const source = {
+        id: sourceId, projectId: project.id, filename: item.filename,
+        format: item.format, sourceRole: req.body.sourceRole || 'manual',
+        snapshot, exchange: null, folderId: null, indexPath: null,
+        gsheetUrl: item.gsheetUrl || null,
+        stats: null, rowCount: (item.records || []).length,
+        importedAt: new Date().toISOString(), importedBy: uploadedBy,
+        detected: item.detected || null,
+      };
+      db.sources.push(source);
+      for (const row of item.records || []) {
+        db.records.push({ id: uuidv4(), sourceId, projectId: project.id, reportDirRel: null, ...row, snapshot: snapshot || row.snapshot || null });
+      }
+      addedSources.push({ id: sourceId, filename: source.filename, rowCount: source.rowCount });
+    }
+  }
+
+  db.staging = db.staging.filter(s => s.id !== st.id);
+  saveDB(db);
+  res.json({ success: true, sources: addedSources, skipped });
+});
+
+// 스테이징 취소 — 파싱 결과·추출 파일 정리 (수용기준 §9-4)
+app.delete('/api/consolidate/staging/:id', (req, res) => {
+  const db = loadDB();
+  const st = db.staging.find(s => s.id === req.params.id);
+  if (!st) return res.json({ success: true });
+  for (const item of st.items || []) {
+    for (const rel of item.cleanupDirs || []) rmDir(path.join(REPORTS_DIR, rel));
+  }
+  db.staging = db.staging.filter(s => s.id !== req.params.id);
+  saveDB(db);
+  res.json({ success: true });
 });
 
 // 다이어그램 업로드 — mermaid 코드 붙여넣기 (JSON body, 파일 업로드 없이)

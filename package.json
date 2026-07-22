@@ -1,6 +1,6 @@
 {
   "name": "test-report-portal",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "테스트 결과 리포트 관리 포털",
   "main": "server.js",
   "scripts": {
@@ -22,6 +22,7 @@
     "mermaid": "^11.16.0",
     "multer": "1.4.5-lts.1",
     "session-file-store": "^1.5.0",
-    "uuid": "9.0.0"
+    "uuid": "9.0.0",
+    "xlsx": "^0.18.5"
   }
 }

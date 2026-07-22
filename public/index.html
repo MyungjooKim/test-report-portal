@@ -148,33 +148,16 @@
     </div>
   </div>
 
-  <!-- 결과 소스 업로드 모달 (결과형 프로젝트) -->
+  <!-- 결과 소스 업로드 위저드 (결과형 프로젝트, Phase 2 — 양식 감지→매핑→미리보기→취합) -->
   <div class="modal-overlay hidden" id="sourceModal">
-    <div class="modal">
+    <div class="modal modal-wide">
       <div class="modal-header">
         <h3>결과 소스 업로드</h3>
-        <button class="modal-close" onclick="closeModal('sourceModal')">✕</button>
+        <button class="modal-close" onclick="closeSourceWizard()">✕</button>
       </div>
-      <div class="modal-body">
-        <p class="form-hint" style="margin-bottom:12px">Playwright HTML 리포트를 <b>ZIP</b>으로 업로드하면 TC ID 기준으로 취합됩니다. (자동화 소스)</p>
-        <div class="form-group">
-          <label>스냅샷/버전 <small>(선택)</small></label>
-          <input type="text" id="sourceSnapshot" class="form-input" placeholder="예: 2607_bingxbn, v3.1">
-        </div>
-        <div class="upload-zone" id="sourceZone">
-          <div class="upload-zone-content">
-            <div class="upload-icon">📊</div>
-            <p>Playwright 리포트 ZIP을 드래그하거나 클릭하여 선택</p>
-            <span class="upload-hint">여러 개 동시 업로드 가능 (거래소·영역별 리포트)</span>
-          </div>
-          <input type="file" id="sourceFileInput" multiple accept=".zip" hidden>
-        </div>
-        <div class="upload-file-list" id="sourceFileList"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="closeModal('sourceModal')">취소</button>
-        <button class="btn btn-primary" onclick="uploadSources()">취합 실행</button>
-      </div>
+      <div class="wiz-steps" id="wizSteps"></div>
+      <div class="modal-body" id="wizBody"></div>
+      <div class="modal-footer" id="wizFooter"></div>
     </div>
   </div>
 

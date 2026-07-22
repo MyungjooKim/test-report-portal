@@ -5,6 +5,17 @@
 > 설계 원본: [`RESULT_CONSOLIDATION_SPEC.md`](./RESULT_CONSOLIDATION_SPEC.md) (§ 참조는 이 스펙 기준)
 > Phase 2 설계: [`RESULT_CONSOLIDATION_PHASE2_DESIGN.md`](./RESULT_CONSOLIDATION_PHASE2_DESIGN.md) (결정 3건 확정 포함)
 
+## 2026-07-22 Phase 2 구현 완료 (v0.11.0)
+
+설계: [`RESULT_CONSOLIDATION_PHASE2_DESIGN.md`](./RESULT_CONSOLIDATION_PHASE2_DESIGN.md) — D1~D4 전부 구현·검증 완료.
+
+- **매뉴얼 어댑터** `lib/adapters/manual-sheet.js` — sheet-store(헤더 탐지·다단 헤더·반복 제거) + report-stats(결과 컬럼 감지) 조합. 시트 자동 채택(D2), TC당 대표값(D3), 플랫폼 유도(D4). XLSX/CSV(SheetJS)·GSheet URL 입력.
+- **취합 코어 확장** — N/A 5번째 상태(D1: totalTc 모수 제외), envResults 보존·환경축(filterable:false), **거래소 조인**(거래소 없는 매뉴얼 레코드를 같은 TC의 모든 거래소 행에 조인 — 없으면 단독 행).
+- **preview/commit 2단계 API** — `POST /consolidate/preview`(파싱·스테이징만, DB 무변화) → `POST /consolidate/commit`(확정). `DELETE /api/consolidate/staging/:id` 취소. 스테이징 TTL 24h(`db.staging`). Playwright 는 dirs 만 보관 후 커밋 시 재파싱. 프리픽스(플랫폼) 불일치 경고 포함.
+- **업로드 위저드** — 소스 모달을 4단계(파일/양식→매핑 확인→미리보기→취합)로 교체, 결과형 업로드 진입점 단일화(리포트 업로드 버튼 재숨김). multer 취합 전용 인스턴스(zip/xlsx/xls/csv).
+- **E2E 검증**: pw-report.zip(18소스·773행) + 파일 B 구조 XLSX → **불일치 2건 실검출**(양방향), N/A 모수 제외(774=775-1), 환경축, SCM- 프리픽스 경고, 취소 무변화, 데모 무회귀(773·73%). 테스트 68종 통과.
+- ⚠ 미검증: 위저드 UI 브라우저 실조작, GSheet URL 입력(Google 세션 필요 — :3000 INTEGRATED 에서 확인).
+
 ## 2026-07-22 추가 작업 (v0.10.0)
 
 - **거래소별 결과 통계** — AI Q&A 칩 → 차트 위젯(AI 미호출) + 📌 대시보드 고정(`project.pinnedWidgets`, `/api/projects/:id/widgets`)
