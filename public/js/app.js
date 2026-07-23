@@ -724,7 +724,7 @@ function renderConsTable() {
     <div class="cons-count">${rows.length ? `${rows.length}행${rows.length > capped.length ? ` (상위 ${capped.length}만 표시)` : ''}` : '조건에 맞는 행이 없습니다 — 상태 필터·사유 칩·검색어 조합을 확인하세요'}</div>
     <table class="cons-table">
       <thead><tr>
-        <th>TC ID</th>${hasExch ? '<th>거래소</th>' : ''}
+        <th>TC ID</th><th>제목</th>${hasExch ? '<th>거래소</th>' : ''}
         ${sources.map(s => `<th>${escapeHtml(s)}</th>`).join('')}
         <th>최종</th><th>사유</th>
       </tr></thead>
@@ -733,6 +733,7 @@ function renderConsTable() {
           <tr class="cons-row ${r.mismatch ? 'row-mismatch' : ''}" data-tc="${escapeAttr(r.tcId)}" data-ex="${escapeAttr(r.exchange || '')}"
               onclick="toggleConsDetail(this)" title="클릭하면 상세(스크린샷·영상)를 펼칩니다">
             <td class="tc-id">${escapeHtml(r.tcId)}</td>
+            ${titleCell(r)}
             ${hasExch ? `<td>${escapeHtml(r.exchange || '')}</td>` : ''}
             ${sources.map(s => `<td>${cellHtml(r.sources[s])}</td>`).join('')}
             <td>${badge(r.final)}${r.mismatch ? ' <span class="mismatch-tag" title="소스 간 결과 불일치">⚠</span>' : ''}</td>
@@ -740,7 +741,7 @@ function renderConsTable() {
           </tr>`).join('')}
       </tbody>
     </table>`;
-  wrap.dataset.cols = 3 + (hasExch ? 1 : 0) + sources.length; // 확장 패널 colspan
+  wrap.dataset.cols = 4 + (hasExch ? 1 : 0) + sources.length; // 확장 패널 colspan (제목 포함)
 }
 
 // ── 행 확장 패널 — TC 상세(스크린샷 썸네일·사유·영상/트레이스 딥링크) lazy 조회 ──
@@ -919,6 +920,17 @@ function showUntaggedModal() {
       </div>
     </div>`;
   openModal('untaggedModal');
+}
+
+// 제목 셀 — 소스 셀의 titles 중 첫 번째 표시. TC ID 태그([SC-…])는 TC ID 컬럼과 중복이라
+// 표시에서만 제거, 원문(전체 제목 목록)은 툴팁.
+const TC_TAG_RE = /\[\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+\s*\]/g;
+function titleCell(r) {
+  const all = [];
+  for (const s of Object.values(r.sources)) for (const t of (s.titles || [])) if (t && !all.includes(t)) all.push(t);
+  if (!all.length) return '<td class="tc-title"></td>';
+  const shown = all[0].replace(TC_TAG_RE, '').trim() || all[0];
+  return `<td class="tc-title" title="${escapeAttr(all.join('\n'))}">${escapeHtml(shown)}${all.length > 1 ? ` <small>+${all.length - 1}</small>` : ''}</td>`;
 }
 
 // 사유 셀 — 자연어 번역문 우선 표시, 원문은 툴팁. 미지 패턴은 원문 그대로(오역 없음 원칙).
