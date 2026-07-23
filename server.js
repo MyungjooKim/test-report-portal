@@ -1114,6 +1114,20 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
           fields: 'gridProperties.frozenRowCount',
         },
       });
+      // JIRA 컬럼(H) — 체크박스(BOOLEAN 검증) + 가운데 정렬, 테스터가 클릭으로 등록 여부 표시
+      requests.push({
+        setDataValidation: {
+          range: { sheetId, startRowIndex: 1, endRowIndex: rowCount, startColumnIndex: 7, endColumnIndex: 8 },
+          rule: { condition: { type: 'BOOLEAN' }, strict: true },
+        },
+      });
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex: 1, endRowIndex: rowCount, startColumnIndex: 7, endColumnIndex: 8 },
+          cell: { userEnteredFormat: { horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE' } },
+          fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment)',
+        },
+      });
     }
     await sheetsApi.spreadsheets.batchUpdate({
       spreadsheetId: created.data.spreadsheetId,
