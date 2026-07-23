@@ -976,13 +976,64 @@ function renderWizFileList() {
     <button class="file-remove" onclick="wiz.files.splice(${i},1);renderWizFileList();renderWizFooter1()">✕</button></div>`).join('');
 }
 
+// ── 청크 업로드 — Cloudflare 요청 본문 100MB 제한 우회 ──
+// 파일을 64MB 조각으로 나눠 순차 전송하면 서버가 재조립해 스테이징한다.
+const UPLOAD_CHUNK_SIZE = 64 * 1024 * 1024;
+
+async function uploadViaChunks(file, onProgress) {
+  const uploadId = (window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  const total = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK_SIZE));
+  for (let i = 0; i < total; i++) {
+    const fd = new FormData();
+    fd.append('uploadId', uploadId);
+    fd.append('chunkIndex', String(i));
+    fd.append('chunk', file.slice(i * UPLOAD_CHUNK_SIZE, (i + 1) * UPLOAD_CHUNK_SIZE));
+    let res;
+    try {
+      res = await fetch('/api/uploads/chunk', { method: 'POST', body: fd });
+    } catch (_) {
+      throw new Error(`'${file.name}' 업로드 중 연결이 끊겼습니다. 네트워크 확인 후 다시 시도해 주세요.`);
+    }
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `'${file.name}' 업로드 실패 (${res.status})`);
+    }
+    if (onProgress) onProgress(i + 1, total);
+  }
+  const res = await fetch('/api/uploads/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uploadId, totalChunks: total, filename: file.name }),
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.error) throw new Error(d.error || `'${file.name}' 업로드 마무리 실패 (${res.status})`);
+  return { stagedName: d.stagedName, originalName: file.name };
+}
+
+// 여러 파일을 청크 업로드로 스테이징하며 오버레이에 진행률 표시
+async function stageFilesWithProgress(files) {
+  const staged = [];
+  for (let n = 0; n < files.length; n++) {
+    const f = files[n];
+    staged.push(await uploadViaChunks(f, (done, total) => {
+      const pct = Math.round((done / total) * 100);
+      showLoadingOverlay(`파일 업로드 중 (${n + 1}/${files.length}) ${f.name} — ${pct}%`);
+    }));
+  }
+  return staged;
+}
+
 async function runWizPreview() {
   if (!currentProjectId || !wiz) return;
-  showLoadingOverlay('양식을 감지하고 파싱하고 있습니다…');
-  const formData = new FormData();
-  for (const f of wiz.files) formData.append('files', f);
-  if (wiz.gsheetUrl) formData.append('gsheetUrl', wiz.gsheetUrl);
+  showLoadingOverlay('파일을 업로드하고 있습니다…');
   try {
+    const staged = await stageFilesWithProgress(wiz.files);
+    showLoadingOverlay('양식을 감지하고 파싱하고 있습니다…');
+    const formData = new FormData();
+    formData.append('stagedFiles', JSON.stringify(staged));
+    if (wiz.gsheetUrl) formData.append('gsheetUrl', wiz.gsheetUrl);
     const res = await fetch(`/api/projects/${currentProjectId}/consolidate/preview`, { method: 'POST', body: formData });
     const d = await res.json();
     hideLoadingOverlay();
@@ -1509,18 +1560,17 @@ async function uploadFiles() {
   btn.textContent = '업로드 중...';
   showLoadingOverlay('파일을 업로드하고 있습니다...');
 
-  const formData = new FormData();
-  for (const f of selectedFiles) {
-    formData.append('files', f);
-  }
-  formData.append('date', document.getElementById('uploadDate').value);
-
   const uploaderName = document.getElementById('uploaderName').value.trim() || '익명';
-  formData.append('uploadedBy', uploaderName);
-  if (document.getElementById('uploadAutomation').checked) formData.append('automation', '1');
   localStorage.setItem('uploaderName', uploaderName);
 
   try {
+    const staged = await stageFilesWithProgress(selectedFiles);
+    showLoadingOverlay('업로드를 처리하고 있습니다…');
+    const formData = new FormData();
+    formData.append('stagedFiles', JSON.stringify(staged));
+    formData.append('date', document.getElementById('uploadDate').value);
+    formData.append('uploadedBy', uploaderName);
+    if (document.getElementById('uploadAutomation').checked) formData.append('automation', '1');
     const res = await fetch(`/api/projects/${currentProjectId}/reports`, {
       method: 'POST',
       body: formData
