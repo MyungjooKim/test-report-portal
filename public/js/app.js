@@ -689,6 +689,7 @@ function toggleConsSources() {
 
 function renderConsTable() {
   if (!consolidatedData) return;
+  applyTitleWidth(); // 저장된 제목 컬럼 폭 복원
   const wrap = document.getElementById('consTableWrap');
   const q = (document.getElementById('consSearch')?.value || '').trim().toUpperCase();
   const sources = consolidatedData.sources;
@@ -724,7 +725,7 @@ function renderConsTable() {
     <div class="cons-count">${rows.length ? `${rows.length}행${rows.length > capped.length ? ` (상위 ${capped.length}만 표시)` : ''}` : '조건에 맞는 행이 없습니다 — 상태 필터·사유 칩·검색어 조합을 확인하세요'}</div>
     <table class="cons-table">
       <thead><tr>
-        <th>TC ID</th><th>제목</th>${hasExch ? '<th>거래소</th>' : ''}
+        <th>TC ID</th><th class="th-title">제목<span class="th-resize" onmousedown="startTitleResize(event)" title="드래그로 폭 조절"></span></th>${hasExch ? '<th>거래소</th>' : ''}
         ${sources.map(s => `<th>${escapeHtml(s)}</th>`).join('')}
         <th>최종</th><th>사유</th>
       </tr></thead>
@@ -922,10 +923,30 @@ function showUntaggedModal() {
   openModal('untaggedModal');
 }
 
+// 제목 컬럼 폭 드래그 조절 — 헤더 오른쪽 가장자리를 끌면 조절되고 localStorage 로 유지
+function applyTitleWidth() {
+  const w = parseInt(localStorage.getItem('consTitleWidth'), 10);
+  if (w) document.documentElement.style.setProperty('--tc-title-w', w + 'px');
+}
+function startTitleResize(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const startX = e.pageX;
+  const startW = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--tc-title-w'), 10) || 240;
+  const move = ev => {
+    const w = Math.min(800, Math.max(120, startW + (ev.pageX - startX)));
+    document.documentElement.style.setProperty('--tc-title-w', w + 'px');
+    localStorage.setItem('consTitleWidth', w);
+  };
+  const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+}
+
 // 제목 셀 — 소스 셀의 titles 중 첫 번째 표시. TC ID 태그([SC-…])는 TC ID 컬럼과 중복이라
 // 표시에서만 제거, 원문(전체 제목 목록)은 툴팁.
-// [SC-A-001] 단일뿐 아니라 [SC-A-001 | SC-A-002] 같은 멀티 ID 묶음(|, /, , 구분)도 제거
-const TC_TAG_RE = /\[\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+(?:\s*[|,/]\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+)*\s*\]/g;
+// [SC-A-001] 단일뿐 아니라 [SC-A-001 | SC-A-002](나열), [SC-A-001 ~ SC-A-012](범위) 묶음도 제거
+const TC_TAG_RE = /\[\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+(?:\s*[|,/~]\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+)*\s*\]/g;
 function titleCell(r) {
   const all = [];
   for (const s of Object.values(r.sources)) for (const t of (s.titles || [])) if (t && !all.includes(t)) all.push(t);
