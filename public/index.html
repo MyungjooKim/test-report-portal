@@ -256,6 +256,31 @@
     </div>
   </div>
 
+  <!-- 결과형으로 발행 모달 (test-run R3 — 발행 A안) -->
+  <div class="modal-overlay hidden" id="publishRunModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>결과형 프로젝트로 발행</h3>
+        <button class="modal-close" onclick="closeModal('publishRunModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>대상 결과형 프로젝트</label>
+          <select id="publishProjectSelect" class="form-input"></select>
+          <div class="form-hint" style="margin-top:6px">
+            보드의 <b>최종</b> 칸이 취합 소스(test-run)로 등록됩니다. 웹/모바일 보드를 같은
+            프로젝트로 발행하면 플랫폼(TC ID 프리픽스)으로 구분되어 함께 취합됩니다.<br>
+            같은 보드를 다시 발행하면 이전 발행분을 <b>교체</b>합니다 (소스가 늘어나지 않음).
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('publishRunModal')">취소</button>
+        <button class="btn btn-primary" id="publishRunBtn" onclick="publishRun()">발행</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 새 수행 보드 모달 (test-run R1) -->
   <div class="modal-overlay hidden" id="newRunModal">
     <div class="modal">

@@ -1659,6 +1659,39 @@ app.post('/api/runs/:id/events', (req, res) => {
   res.json({ success: true, event: ev, cell, summary: runBoard.runSummary(run) });
 });
 
+// 결과형으로 발행 (R3 — A안 확정) — 보드의 최종 칸을 결과형 프로젝트 소스로 등록.
+// 재발행 = 같은 보드가 이 프로젝트에 발행한 이전 소스를 교체(upsert) — 소스가 늘어나지 않는다.
+app.post('/api/runs/:id/publish', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+  const project = db.projects.find(p => p.id === (req.body && req.body.projectId));
+  if (!project) return res.status(404).json({ error: '결과형 프로젝트를 찾을 수 없습니다.' });
+  if (project.type !== 'result') return res.status(400).json({ error: '결과형 프로젝트에만 발행할 수 있습니다.' });
+
+  const records = runBoard.publishRecords(run);
+  const olds = db.sources.filter(s => s.projectId === project.id && s.runId === run.id);
+  for (const old of olds) db.records = db.records.filter(r => r.sourceId !== old.id);
+  db.sources = db.sources.filter(s => !(s.projectId === project.id && s.runId === run.id));
+
+  const sourceId = uuidv4();
+  db.sources.push({
+    id: sourceId, projectId: project.id, runId: run.id,
+    filename: run.name, format: 'test-run', sourceRole: 'test-run',
+    snapshot: run.snapshot || null, exchange: null, folderId: null, indexPath: null,
+    gsheetUrl: null, stats: null, rowCount: records.length,
+    importedAt: new Date().toISOString(), importedBy: sessionEmail(req),
+    detected: { format: 'test-run', tcCount: (run.tcs || []).length, targetVersion: run.targetVersion || null },
+  });
+  for (const row of records) {
+    db.records.push({ id: uuidv4(), sourceId, projectId: project.id, reportDirRel: null, ...row });
+  }
+
+  run.publishedTo = { projectId: project.id, at: new Date().toISOString(), sourceId };
+  saveDB(db);
+  res.json({ success: true, sourceId, rowCount: records.length, replaced: olds.length > 0, projectId: project.id });
+});
+
 // 셀 메모/이력 스레드 — 해당 셀의 이벤트 전체 (결과 변경 = 시스템 항목, note = 메모)
 app.get('/api/runs/:id/cell-events', (req, res) => {
   const db = loadDB();

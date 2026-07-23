@@ -124,3 +124,50 @@ test('요약: 대상 거래소 제한 셀은 모수 제외, Fail 집계', () => 
   assert.equal(s.perExchange['BingX'].total, 1);
   assert.equal(s.perExchange['Binance'].fail, 1);
 });
+
+// ── 결과형 발행 (R3 — A안) ──
+const { publishRecords } = require('../lib/run-board');
+
+test('발행: 활성 셀만, 최종값·문서 컬럼·플랫폼 포함, 최신 메모 = Fail 사유', () => {
+  const run = {
+    id: 'r1', name: '7월말 Epic#19-모바일', snapshot: '2607_epic19',
+    exchanges: ['Binance', 'BingX'],
+    tcs: [
+      { tcId: 'SCM-A-001', title: 'a', category1: 'Trade', priority: 'High', coveragePct: null,
+        precondition: 'pre', steps: 'st', expected: 'ex', platform: 'mobile-web', targetExchanges: [] },
+      { tcId: 'SCM-A-002', title: 'b', category1: 'Trade', coveragePct: null, platform: 'mobile-web',
+        targetExchanges: ['Binance'] },
+    ],
+    events: [
+      { id: 'e1', tcId: 'SCM-A-001', exchange: 'Binance', kind: 'result', slot: 'manual', result: 'Fail', at: 't1' },
+      { id: 'e2', tcId: 'SCM-A-001', exchange: 'Binance', kind: 'note', text: '주문 버튼 미노출', at: 't2' },
+    ],
+  };
+  const recs = publishRecords(run);
+  // SCM-A-001 × 2 거래소 + SCM-A-002 × Binance 만 = 3행 (대상 외 셀 제외)
+  assert.equal(recs.length, 3);
+  assert.ok(recs.every(r => r.source === 'test-run' && r.snapshot === '2607_epic19' && r.untagged === false));
+
+  const failRec = recs.find(r => r.tcId === 'SCM-A-001' && r.exchange === 'Binance');
+  assert.equal(failRec.result, 'Fail');
+  assert.equal(failRec.reasonNote, '주문 버튼 미노출'); // 최신 셀 메모 = 사유
+  assert.equal(failRec.precondition, 'pre');            // Jira Description 재료
+  assert.equal(failRec.platform, 'mobile-web');
+  assert.equal(failRec.suite, 'Trade');
+
+  const ntRec = recs.find(r => r.tcId === 'SCM-A-001' && r.exchange === 'BingX');
+  assert.equal(ntRec.result, 'N/T');   // 미기입도 발행 — 결과형 진행률 모수
+  assert.equal(ntRec.reasonNote, null);
+});
+
+test('발행: 거래소 축 없는 보드는 exchange null 레코드', () => {
+  const run = {
+    id: 'r2', name: 'b', snapshot: null, exchanges: [],
+    tcs: [{ tcId: 'SCM-B-001', coveragePct: null, targetExchanges: [] }],
+    events: [{ id: 'e1', tcId: 'SCM-B-001', exchange: '', kind: 'result', slot: 'manual', result: 'Pass', at: 't1' }],
+  };
+  const recs = publishRecords(run);
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0].exchange, null);
+  assert.equal(recs[0].result, 'Pass');
+});

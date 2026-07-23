@@ -3020,11 +3020,65 @@ function renderRunHeader() {
     <span class="run-chip run-chip-version" onclick="changeRunVersion()" title="클릭하여 대상 버전 변경 — 기존 결과는 유지되고 ⚠ 재검 배지가 붙습니다">🏷 ${escapeHtml(r.targetVersion || '버전 미지정')}</span>
     ${stale}
     <span class="run-chip">${r.exchanges && r.exchanges.length ? escapeHtml(r.exchanges.join(' · ')) : '거래소 축 없음'}</span>
-    ${r.status === 'closed' ? '<span class="run-chip run-chip-closed">🔒 닫힘</span>' : ''}`;
+    ${r.status === 'closed' ? '<span class="run-chip run-chip-closed">🔒 닫힘</span>' : ''}
+    ${publishedChip(r)}`;
 
   document.getElementById('runActions').innerHTML = `
+    <button class="btn btn-primary" onclick="openPublishRunModal()">📊 ${r.publishedTo ? '결과형으로 재발행' : '결과형으로 발행'}</button>
     <button class="btn btn-secondary" onclick="toggleRunStatus()">${r.status === 'closed' ? '보드 다시 열기' : '보드 닫기'}</button>
     <button class="btn btn-danger-outline" onclick="deleteRun()">🗑 삭제</button>`;
+}
+
+// ── 결과형으로 발행 (R3 — A안) ──
+// 발행 이후 기입분은 재발행으로 갱신 — 칩으로 발행 시각을 보여 재발행 필요를 알린다
+function publishedChip(r) {
+  if (!r.publishedTo) return '';
+  const p = findProjectInTree(projectTree, r.publishedTo.projectId);
+  const name = p ? p.name : '(삭제된 프로젝트)';
+  const chip = `📊 발행됨 → ${escapeHtml(name)} · ${formatTime(r.publishedTo.at)}`;
+  return p
+    ? `<span class="run-chip run-chip-version" onclick="selectProject('${p.id}')" title="취합 대시보드 열기">${chip}</span>`
+    : `<span class="run-chip run-chip-hint">${chip}</span>`;
+}
+
+function resultProjects() {
+  return flattenTree(projectTree).filter(p => p.type === 'result');
+}
+
+function openPublishRunModal() {
+  const projects = resultProjects();
+  if (!projects.length) {
+    showToast('결과형 프로젝트가 없습니다. 사이드바에서 결과형 프로젝트를 먼저 만들어 주세요.', 'error');
+    return;
+  }
+  const sel = document.getElementById('publishProjectSelect');
+  const last = currentRun.publishedTo && currentRun.publishedTo.projectId;
+  sel.innerHTML = projects.map(p =>
+    `<option value="${p.id}" ${p.id === last ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
+  openModal('publishRunModal');
+}
+
+async function publishRun() {
+  const projectId = document.getElementById('publishProjectSelect').value;
+  if (!projectId || !currentRun) return;
+  const btn = document.getElementById('publishRunBtn');
+  btn.disabled = true;
+  btn.textContent = '발행 중...';
+  try {
+    const d = await api(`/api/runs/${currentRun.id}/publish`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId }),
+    });
+    if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '발행 실패'), 'error'); return; }
+    closeModal('publishRunModal');
+    currentRun.publishedTo = { projectId: d.projectId, at: new Date().toISOString(), sourceId: d.sourceId };
+    renderRunHeader();
+    showToast(`✅ ${d.replaced ? '재발행 완료 (이전 발행분 교체)' : '발행 완료'} — ${d.rowCount}행`, 'success');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '발행';
+  }
 }
 
 function renderRunSummary() {

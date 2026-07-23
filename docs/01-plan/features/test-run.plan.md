@@ -130,11 +130,37 @@ reporter: [['list'], ['./tr-run-reporter.js', {
 
 | 단계 | 내용 | 산출 |
 |---|---|---|
-| R1 | 보드 생성(TC 양식 업로드→파싱) + 그리드 + 수동 드롭다운 + 셀 메모/이력 | 수동 수행 관리 가능 |
+| R1 | 보드 생성(TC 양식 업로드→파싱) + 그리드 + 수동 드롭다운 + 셀 메모/이력 | ✅ v0.15.0 (2026-07-23) |
 | R2 | Playwright 리포터 + auto-results API + 자동 칸 실시간 반영(폴링) | 실시간 자동화 기입 |
-| R3 | 최종 확정 UX 정리, run 종료(닫기), 결과형 프로젝트로 발행(스냅샷) 연계 | 사후 분석·Jira 연결 |
+| R3 | 최종 확정 UX 정리, run 종료(닫기), 결과형 프로젝트로 발행(스냅샷) 연계 | 발행·닫기 ✅ v0.16.0 / Jira 는 발행 경유 |
 
-R3(발행)은 2차 — 보드가 자리 잡은 뒤 기존 취합·Jira 내보내기와 연결한다.
+## 결과형 발행 (R3 — 2026-07-23 사용자 A안 확정, v0.16.0 구현)
+
+- 보드 "📊 결과형으로 발행" → 최종(final) 칸을 정규화 레코드(source: `test-run`)로 변환해
+  결과형 프로젝트 소스로 등록 (lib/run-board.js publishRecords, POST /api/runs/:id/publish)
+- **재발행 = 같은 보드의 이전 발행분 교체(upsert)** — 소스가 늘어나지 않음. 발행 칩(발행처·시각) 표시
+- 웹/모바일 보드를 **같은 결과형 프로젝트**로 발행 → platform(TC ID 프리픽스 SC-/SCM-)으로 구분,
+  기존 취합 대시보드(축 분포·Fail 사유·AI·Jira 내보내기·TR 상세) 전부 재사용
+- 셀 최신 메모 = 발행 레코드의 reasonNote(Fail/Blocked/N/A) — 취합 사유 컬럼·Jira Actual Result 재료
+- 대상 거래소 외 셀은 발행 제외, N/T 도 발행(진행률 모수), TC 문서 컬럼 동봉(Jira Description P5 재료)
+- 라이브 연결(B안)은 배제 — 진행 중 값이 확정 대시보드에 섞여 결과형 정체성 훼손
+
+## TC Manager(tc-man) 연동 (2026-07-23 협의 — "A안 먼저, B안 준비")
+
+tc-man = TC 원장(마스터). Next.js+Prisma+Postgres, Snapshot/TestCaseExchange/coveragePercent/
+automationStatus/isSmoke/TestProgramMapping 이 보드 개념과 1:1 대응. (github.com/iconloop/testcase_manager)
+
+- **지금(A안)**: tc-man 스냅샷 → Sheets 내보내기 → 보드 생성에 URL 입력 (현행 기능으로 동작).
+  한계: 스냅샷 export 시트에 Coverage %·자동화 상태 컬럼이 없어 부분 커버리지 자동 파생 불가
+- **본명(B안, 준비)**: 보드 생성 모달에 "TC Manager 스냅샷" 탭 — tr_ui 서버가 tc-man API 호출
+  (`GET /api/snapshots`, `GET /api/snapshots/:id` + TC 목록) → coveragePercent·TestCaseExchange·
+  category1/2/3 원본 그대로 매핑. **선결: tc-man 에 서버 간 read-only 인증(API 키) 추가 협의**
+  (현행 NextAuth 세션 전용, /api/auth/access-token 은 Google Drive Picker 용이라 용도 다름)
+- DB 직결(C안)은 스키마 결합 때문에 배제 (로컬 검증용으로만)
+- 역할 정리: tc-man = TC 원장·스냅샷 / tr_ui 보드 = 수행·실시간·이력·대시보드.
+  결과 회신(tr_ui → tc-man TestResult write-back)은 추후 결정
+- **2000 TC 스케일 선결**: 도입 전 run 저장을 data/runs/*.json 분리(§리스크), 그리드는 Suite/대분류
+  접기 또는 기본 필터 — 실측 후 결정
 
 ## 동시성 — 수동 기입 중 자동화 유입 (2026-07-23 추가 협의)
 
