@@ -1946,3 +1946,5 @@ mark {
 .run-group-head:hover { background: rgba(255,255,255,0.06); }
 .run-group-head .tree-toggle { font-size: 9px; }
 .run-item-child { padding-left: 30px; }
+/* 접힌 그룹 안에 현재 보고 있는 보드가 있으면 헤더를 활성색으로 표시 */
+.run-group-head.active { background: var(--sidebar-active); color: #fff; }

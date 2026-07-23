@@ -3013,15 +3013,17 @@ function renderRunList() {
     }, { filled: 0, total: 0, fail: 0 });
     const isCollapsed = collapsed.has(r.group);
     const hasActive = members.some(m => m.id === currentRunId);
+    // 접힘 상태는 항상 존중 — 활성 보드가 안에 있으면 헤더에 표시만 남긴다
+    // (이전의 "활성 그룹 강제 펼침"은 접기 클릭이 안 먹는 것처럼 보이는 버그를 만들었음)
     html += `
-      <li class="run-group-head ${hasActive ? 'has-active' : ''}" onclick="toggleRunGroup('${escapeAttr(r.group)}')" title="클릭하여 ${isCollapsed ? '펼치기' : '접기'}">
+      <li class="run-group-head ${isCollapsed && hasActive ? 'active' : ''}" onclick="toggleRunGroup('${escapeAttr(r.group)}')" title="클릭하여 ${isCollapsed ? '펼치기' : '접기'}">
         <span class="tree-toggle ${isCollapsed ? '' : 'expanded'}">▶</span>
         <span class="run-item-icon">📁</span>
         <span class="tree-name">${escapeHtml(r.group)}</span>
         ${agg.fail ? `<span class="run-fail-dot" title="Fail ${agg.fail}건">${agg.fail}</span>` : ''}
         <span class="report-count">${agg.filled}/${agg.total}</span>
       </li>`;
-    if (!isCollapsed || hasActive) html += members.map(m => runItemHtml(m, true)).join('');
+    if (!isCollapsed) html += members.map(m => runItemHtml(m, true)).join('');
   }
   el.innerHTML = html;
 }
