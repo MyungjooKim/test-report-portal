@@ -25,8 +25,16 @@
       </div>
     </div>
     <nav class="sidebar-nav">
+      <!-- 단계형 구성(A안, 2026-07-23): 작업 흐름 순 — 진행 중(수행 보드) → 확정 결과(대시보드) -->
       <div class="nav-section">
-        <div class="nav-section-title">프로젝트</div>
+        <div class="nav-section-title">🧪 테스트 수행 보드</div>
+        <div class="nav-section-sub">진행 중 · 실시간 기입</div>
+        <ul class="run-list" id="runList"></ul>
+        <button class="btn-add-project" onclick="openNewRunModal()">+ 새 수행 보드</button>
+      </div>
+      <div class="nav-section">
+        <div class="nav-section-title">📊 결과 대시보드</div>
+        <div class="nav-section-sub">확정 결과 · 취합 분석 · 리포트</div>
         <ul class="project-list" id="projectList"></ul>
         <button class="btn-add-project" onclick="openNewProjectModal(null)">+ 새 프로젝트</button>
       </div>
@@ -88,6 +96,20 @@
       </div>
       <div class="date-groups" id="dateGroups"></div>
       <div class="consolidated-view" id="consolidatedView" style="display:none"></div>
+    </main>
+
+    <!-- 테스트 수행 보드 (test-run R1) -->
+    <main class="main-content hidden" id="runView">
+      <div class="page-header">
+        <div class="page-header-left">
+          <h2 id="runTitle">수행 보드</h2>
+          <div id="runMeta" class="run-meta"></div>
+        </div>
+        <div class="page-actions" id="runActions"></div>
+      </div>
+      <div id="runSummary" class="run-summary"></div>
+      <div id="runToolbar" class="run-toolbar"></div>
+      <div id="runGridWrap" class="run-grid-wrap"></div>
     </main>
 
     <!-- 리포트 뷰어 -->
@@ -232,6 +254,104 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeModal('uploadModal')">취소</button>
         <button class="btn btn-primary" id="uploadBtn" onclick="uploadFiles()" disabled>업로드</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 결과형으로 발행 모달 (test-run R3 — 발행 A안) -->
+  <div class="modal-overlay hidden" id="publishRunModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>결과 대시보드 만들기</h3>
+        <button class="modal-close" onclick="closeModal('publishRunModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>대시보드 이름</label>
+          <input type="text" id="publishName" class="form-input" placeholder="예: 7월말 Epic#19-모바일">
+        </div>
+        <div class="form-group">
+          <label>폴더 위치</label>
+          <select id="publishParentSelect" class="form-input"></select>
+          <div class="form-hint" style="margin-top:6px">
+            보드의 <b>최종</b> 결과로 취합 대시보드(결과형 프로젝트)가 새로 만들어집니다 —
+            통계·Fail 사유·AI 분석·Jira 내보내기를 여기서 사용합니다.<br>
+            이후 보드에서 <b>대시보드 갱신</b>을 누르면 이 대시보드에 최신 결과가 반영됩니다.
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('publishRunModal')">취소</button>
+        <button class="btn btn-primary" id="publishRunBtn" onclick="publishRun()">대시보드 만들기</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 새 수행 보드 모달 (test-run R1) -->
+  <div class="modal-overlay hidden" id="newRunModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>새 수행 보드 만들기</h3>
+        <button class="modal-close" onclick="closeModal('newRunModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="form-group">
+            <label>그룹 (선택)</label>
+            <input type="text" id="runGroup" class="form-input" list="runGroupList" placeholder="새 이름 입력 = 새 그룹 생성">
+            <datalist id="runGroupList"></datalist>
+            <div class="form-hint" style="margin-top:4px">기존 그룹은 자동완성 — 새 이름을 입력하면 그룹이 만들어집니다</div>
+          </div>
+          <div class="form-group">
+            <label>보드 이름</label>
+            <input type="text" id="runName" class="form-input" placeholder="예: PC 웹 / 모바일">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>TC 소스</label>
+          <div class="upload-tabs">
+            <button type="button" class="upload-tab active" onclick="switchRunTab('file')">📋 파일</button>
+            <button type="button" class="upload-tab" onclick="switchRunTab('gsheet')">📊 Google Sheets</button>
+            <button type="button" class="upload-tab" onclick="switchRunTab('tcman')">🗂 TC Manager</button>
+          </div>
+          <div class="upload-tab-content active" id="runTabFile">
+            <div class="upload-zone upload-zone-sm" id="runFileZone">
+              <div class="upload-zone-content">
+                <p id="runFileLabel">📋 TC 양식 파일(XLSX/CSV)을 드래그하거나 클릭하여 선택</p>
+                <span class="upload-hint">TC ID·사전조건·테스트 스텝·기대결과·중요도 컬럼을 자동 감지합니다</span>
+              </div>
+              <input type="file" id="runFileInput" accept=".xlsx,.xls,.csv" hidden>
+            </div>
+          </div>
+          <div class="upload-tab-content" id="runTabGsheet">
+            <input type="text" id="runGsheetUrl" class="form-input" placeholder="Google Sheets URL 또는 ID">
+          </div>
+          <div class="upload-tab-content" id="runTabTcman">
+            <select id="runTcmanSelect" class="form-input"></select>
+            <div class="form-hint" id="runTcmanHint" style="margin-top:6px">
+              스냅샷을 선택하면 보드 이름·스냅샷·거래소 축이 자동으로 채워집니다.
+              자동화 커버리지(Coverage %)·대상 거래소 매핑이 원본 그대로 반영됩니다.
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>스냅샷 (테스트 주기)</label>
+            <input type="text" id="runSnapshot" class="form-input" placeholder="예: 2607_bingxbn">
+          </div>
+          <div class="form-group">
+            <label>대상 버전 (현재 빌드)</label>
+            <input type="text" id="runTargetVersion" class="form-input" placeholder="예: v1.2.4">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>거래소 축</label>
+          <input type="text" id="runExchanges" class="form-input" placeholder="쉼표 구분 — 예: Binance, BingX (공란 = 결과 컬럼 1개)">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('newRunModal')">취소</button>
+        <button class="btn btn-primary" id="createRunBtn" onclick="createRun()">보드 생성</button>
       </div>
     </div>
   </div>
