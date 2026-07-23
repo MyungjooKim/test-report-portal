@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.13.0] - 2026-07-23
+
+### Added — Jira 등록용 Fail 이슈 내보내기 (P1~P4)
+- 취합 표 Fail 행 체크박스 + 전체 선택/해제 + "Jira XLSX / Jira Sheets" 버튼
+- 거래소별 시트 분리, 양식 = QA 예시 시트(No·Issue Type·스위트·Summary·Description·스펙·스크린샷·JIRA·Link)
+- Description 자동 생성(lib/jira-export.js) — 원본 리포트의 스텝·에러를 4단 틀로 문장화
+  (Pre-condition/Steps/Actual/Expected), 예시 시트 [SC-SETT-002] 와 1:1 재현 검증
+- testid→한글 요소명 사전 18→59개 확장 — QA 예시 시트 스텝과 운영 리포트 액션 시퀀스
+  위치 정렬(101/106행)로 자동 추출, 다수결 70% 이상만 채택
+- 스크린샷 컬럼 = 절대 URL(클릭 열람), JIRA/Link 는 테스터 수동 기입용 빈 컬럼
+- 매뉴얼 전용 Fail 은 스킵 안내(P5 매뉴얼 어댑터 확장 예정)
+
+## [0.12.3] - 2026-07-23
+
+### Added — 취합 표에 제목 컬럼
+- TC ID 다음에 제목 컬럼 추가 (Playwright 테스트 제목 / 매뉴얼 소분류·항목 컬럼)
+- 제목 안 [SC-…] 태그는 TC ID 컬럼과 중복이라 표시에서 제거, 전체 제목은 툴팁
+- 긴 제목 말줄임, 제목 여러 개(멀티 태그 커버)면 첫 제목 + "+N" 표기
+
 ## [0.12.2] - 2026-07-23
 
 ### Added — 미태그 목록 모달

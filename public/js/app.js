@@ -467,6 +467,8 @@ async function convertToResult() {
 // ===== 결과 취합 대시보드 (결과형 프로젝트) =====
 let consolidatedData = null;
 let consolidatedFilter = 'all';
+let consSelected = new Set();      // Jira 내보내기 체크 상태 — key: `${tcId}|${exchange||''}`
+let consVisibleFailKeys = [];      // 현재 필터로 보이는 Fail 행 key (전체 선택/해제 대상)
 
 // 대시보드 구성: 스펙 §9.3 (2026-07-21 개정) ① 요약 밴드 → ② 축별 분포 → ③ Fail 사유 패턴
 // → ④ 소스 파일(접힘) → ⑤ pivot 표(스크롤) → ⑥ AI(Fail 분석 + Q&A).
@@ -485,6 +487,7 @@ async function renderConsolidated(id) {
   consolidatedData = data;
   consProjectId = id;
   consolidatedFilter = 'all'; consAxisFilter = null; consReasonFilter = null; consSearchQ = '';
+  consSelected.clear(); // Jira 내보내기 선택은 프로젝트/데이터 갱신 시 초기화
   Object.keys(consDetailCache).forEach(k => delete consDetailCache[k]); // 데이터 갱신 시 상세 캐시 무효화
 
   if (!data.sourceFiles || data.sourceFiles.length === 0) {
@@ -635,8 +638,14 @@ function renderConsFilters() {
         `<button class="cons-filter ${consolidatedFilter===k?'active':''}" onclick="setConsFilter('${k}')">${label}</button>`).join('')}
       <input type="text" class="cons-search" id="consSearch" placeholder="TC ID 검색…" value="${escapeAttr(consSearchQ)}" oninput="consSearchQ=this.value; renderConsTable()">
       ${chips.join('')}
+      <span class="jira-export-box">
+        <button class="btn btn-sm" id="jiraXlsxBtn" disabled onclick="jiraExportRun('xlsx')" title="체크한 Fail 항목을 Jira 등록용 XLSX 로 다운로드">📤 Jira XLSX</button>
+        <button class="btn btn-sm" id="jiraSheetBtn" disabled onclick="jiraExportRun('gsheet')" title="체크한 Fail 항목으로 Google Spreadsheet 생성">📤 Jira Sheets</button>
+        <span id="jiraSelCount" class="jira-sel-count"></span>
+      </span>
       ${data.untagged.count ? `<span class="cons-untagged" title="TC ID 없는 테스트(setup/teardown/미태그) — 클릭하면 목록" onclick="showUntaggedModal()">미태그 ${data.untagged.count}건</span>` : ''}
     </div>`;
+  updateJiraSelCount();
 }
 
 // 축별 분포 스택 바 한 줄 (기존 renderStackRow와 동일 문법 + 클릭 필터)
@@ -689,6 +698,7 @@ function toggleConsSources() {
 
 function renderConsTable() {
   if (!consolidatedData) return;
+  applyTitleWidth(); // 저장된 제목 컬럼 폭 복원
   const wrap = document.getElementById('consTableWrap');
   const q = (document.getElementById('consSearch')?.value || '').trim().toUpperCase();
   const sources = consolidatedData.sources;
@@ -720,11 +730,22 @@ function renderConsTable() {
   };
   const capped = rows.slice(0, 1000);
 
+  consVisibleFailKeys = capped.filter(r => r.final === 'Fail').map(r => `${r.tcId}|${r.exchange || ''}`);
+  // 헤더 체크박스 상태 반영 — 안 하면 재렌더마다 '해제'로 그려져 토글(전체 해제)이 불가능해진다
+  const allSelected = consVisibleFailKeys.length > 0 && consVisibleFailKeys.every(k => consSelected.has(k));
+  const selCell = (r) => {
+    if (r.final !== 'Fail') return '<td class="td-sel"></td>';
+    const key = `${r.tcId}|${r.exchange || ''}`;
+    return `<td class="td-sel" onclick="event.stopPropagation()">
+      <input type="checkbox" ${consSelected.has(key) ? 'checked' : ''} onchange="toggleConsSelect('${escapeAttr(key)}', this.checked)" title="Jira 내보내기 대상 선택"></td>`;
+  };
+
   wrap.innerHTML = `
     <div class="cons-count">${rows.length ? `${rows.length}행${rows.length > capped.length ? ` (상위 ${capped.length}만 표시)` : ''}` : '조건에 맞는 행이 없습니다 — 상태 필터·사유 칩·검색어 조합을 확인하세요'}</div>
     <table class="cons-table">
       <thead><tr>
-        <th>TC ID</th>${hasExch ? '<th>거래소</th>' : ''}
+        <th class="th-sel"><input type="checkbox" ${allSelected ? 'checked' : ''} onclick="toggleConsSelectAll(this.checked)" title="보이는 Fail 전체 선택/해제"></th>
+        <th>TC ID</th><th class="th-title">제목<span class="th-resize" onmousedown="startTitleResize(event)" title="드래그로 폭 조절"></span></th>${hasExch ? '<th>거래소</th>' : ''}
         ${sources.map(s => `<th>${escapeHtml(s)}</th>`).join('')}
         <th>최종</th><th>사유</th>
       </tr></thead>
@@ -732,7 +753,9 @@ function renderConsTable() {
         ${capped.map(r => `
           <tr class="cons-row ${r.mismatch ? 'row-mismatch' : ''}" data-tc="${escapeAttr(r.tcId)}" data-ex="${escapeAttr(r.exchange || '')}"
               onclick="toggleConsDetail(this)" title="클릭하면 상세(스크린샷·영상)를 펼칩니다">
+            ${selCell(r)}
             <td class="tc-id">${escapeHtml(r.tcId)}</td>
+            ${titleCell(r)}
             ${hasExch ? `<td>${escapeHtml(r.exchange || '')}</td>` : ''}
             ${sources.map(s => `<td>${cellHtml(r.sources[s])}</td>`).join('')}
             <td>${badge(r.final)}${r.mismatch ? ' <span class="mismatch-tag" title="소스 간 결과 불일치">⚠</span>' : ''}</td>
@@ -740,7 +763,7 @@ function renderConsTable() {
           </tr>`).join('')}
       </tbody>
     </table>`;
-  wrap.dataset.cols = 3 + (hasExch ? 1 : 0) + sources.length; // 확장 패널 colspan
+  wrap.dataset.cols = 5 + (hasExch ? 1 : 0) + sources.length; // 확장 패널 colspan (선택+제목 포함)
 }
 
 // ── 행 확장 패널 — TC 상세(스크린샷 썸네일·사유·영상/트레이스 딥링크) lazy 조회 ──
@@ -877,6 +900,69 @@ function closeLightbox() {
   lb = null;
 }
 
+// ── Jira 등록용 내보내기 (docs/01-plan/features/jira-export.plan.md) ──
+function toggleConsSelect(key, on) {
+  if (on) consSelected.add(key); else consSelected.delete(key);
+  updateJiraSelCount();
+}
+
+function toggleConsSelectAll(on) {
+  consVisibleFailKeys.forEach(k => on ? consSelected.add(k) : consSelected.delete(k));
+  renderConsTable();
+  updateJiraSelCount();
+}
+
+function updateJiraSelCount() {
+  const el = document.getElementById('jiraSelCount');
+  if (el) el.textContent = consSelected.size ? `${consSelected.size}건 선택` : '';
+  ['jiraXlsxBtn', 'jiraSheetBtn'].forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = !consSelected.size;
+  });
+}
+
+async function jiraExportRun(format) {
+  if (!consSelected.size) { showToast('내보낼 Fail 항목을 먼저 체크해 주세요', 'error'); return; }
+  const items = [...consSelected].map(k => {
+    const i = k.lastIndexOf('|');
+    return { tcId: k.slice(0, i), exchange: k.slice(i + 1) || null };
+  });
+  showLoadingOverlay(format === 'gsheet' ? 'Google Spreadsheet 를 생성하고 있습니다…' : 'Jira 등록용 XLSX 를 생성하고 있습니다…');
+  try {
+    const res = await fetch(`/api/projects/${consProjectId}/jira-export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, format }),
+    });
+    if (format === 'xlsx' && res.ok) {
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `jira-export-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      hideLoadingOverlay();
+      const skipped = JSON.parse(decodeURIComponent(res.headers.get('X-Jira-Export-Skipped') || '%5B%5D'));
+      showToast(`✅ Jira 등록용 XLSX 다운로드 완료 (${items.length - skipped.length}건)`, 'success');
+      skipped.forEach(s => showToast(`⚠️ ${s.tcId}: ${s.reason}`, 'error'));
+      return;
+    }
+    const d = await res.json().catch(() => ({}));
+    hideLoadingOverlay();
+    if (!res.ok || d.error) {
+      showToast('❌ ' + (d.error || `내보내기 실패 (${res.status})`), 'error');
+      (d.skipped || []).forEach(s => showToast(`⚠️ ${s.tcId}: ${s.reason}`, 'error'));
+      return;
+    }
+    window.open(d.url, '_blank');
+    showToast('✅ Google Spreadsheet 생성 완료 — 새 탭에서 확인하세요', 'success');
+    (d.skipped || []).forEach(s => showToast(`⚠️ ${s.tcId}: ${s.reason}`, 'error'));
+  } catch (e) {
+    hideLoadingOverlay();
+    showToast('❌ 내보내기 실패: ' + e.message, 'error');
+  }
+}
+
 // 미태그 목록 모달 — TC ID 태그 없는 테스트(setup/teardown/태그 누락) 열람. N/T(skipped) 우선 정렬.
 function showUntaggedModal() {
   const u = consolidatedData && consolidatedData.untagged;
@@ -919,6 +1005,38 @@ function showUntaggedModal() {
       </div>
     </div>`;
   openModal('untaggedModal');
+}
+
+// 제목 컬럼 폭 드래그 조절 — 헤더 오른쪽 가장자리를 끌면 조절되고 localStorage 로 유지
+function applyTitleWidth() {
+  const w = parseInt(localStorage.getItem('consTitleWidth'), 10);
+  if (w) document.documentElement.style.setProperty('--tc-title-w', w + 'px');
+}
+function startTitleResize(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const startX = e.pageX;
+  const startW = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--tc-title-w'), 10) || 240;
+  const move = ev => {
+    const w = Math.min(800, Math.max(120, startW + (ev.pageX - startX)));
+    document.documentElement.style.setProperty('--tc-title-w', w + 'px');
+    localStorage.setItem('consTitleWidth', w);
+  };
+  const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+}
+
+// 제목 셀 — 소스 셀의 titles 중 첫 번째 표시. TC ID 태그([SC-…])는 TC ID 컬럼과 중복이라
+// 표시에서만 제거, 원문(전체 제목 목록)은 툴팁.
+// [SC-A-001] 단일뿐 아니라 [SC-A-001 | SC-A-002](나열), [SC-A-001 ~ SC-A-012](범위) 묶음도 제거
+const TC_TAG_RE = /\[\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+(?:\s*[|,/~]\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+)*\s*\]/g;
+function titleCell(r) {
+  const all = [];
+  for (const s of Object.values(r.sources)) for (const t of (s.titles || [])) if (t && !all.includes(t)) all.push(t);
+  if (!all.length) return '<td class="tc-title"></td>';
+  const shown = all[0].replace(TC_TAG_RE, '').trim() || all[0];
+  return `<td class="tc-title" title="${escapeAttr(all.join('\n'))}">${escapeHtml(shown)}${all.length > 1 ? ` <small>+${all.length - 1}</small>` : ''}</td>`;
 }
 
 // 사유 셀 — 자연어 번역문 우선 표시, 원문은 툴팁. 미지 패턴은 원문 그대로(오역 없음 원칙).

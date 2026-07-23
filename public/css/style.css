@@ -1630,6 +1630,15 @@ mark {
 .cons-filter { border: 1px solid var(--border); background: var(--card-bg); color: var(--text); padding: 4px 12px; border-radius: 14px; cursor: pointer; font-size: 13px; }
 .cons-filter.active { background: var(--primary); color: #fff; border-color: var(--primary); }
 .cons-search { flex: 1; min-width: 160px; max-width: 260px; padding: 5px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--text); }
+.cons-table th.th-title { position: relative; }
+.cons-table th.th-title .th-resize { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; cursor: col-resize; }
+.cons-table th.th-title .th-resize:hover { background: var(--border); }
+.cons-table th.th-title, .cons-table td.tc-title { max-width: var(--tc-title-w, 240px); width: var(--tc-title-w, 240px); }
+.cons-table td.tc-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.cons-table td.tc-title small { color: var(--text-secondary); opacity: 0.7; }
+.cons-table .th-sel, .cons-table .td-sel { width: 28px; text-align: center; }
+.jira-export-box { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; }
+.jira-sel-count { font-size: 12px; color: var(--primary); }
 .cons-untagged { font-size: 12px; color: var(--warning); margin-left: auto; cursor: pointer; }
 .cons-untagged:hover { text-decoration: underline; }
 .untagged-note { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; }

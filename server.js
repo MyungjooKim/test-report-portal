@@ -980,6 +980,95 @@ app.get('/api/projects/:id/tc-detail', (req, res) => {
   res.json({ tcId, exchange, records });
 });
 
+// ── Jira 등록용 내보내기 — docs/01-plan/features/jira-export.plan.md ──
+// 체크된 Fail TC → 거래소별 시트(XLSX 다운로드 / Google Spreadsheet 생성).
+// Description 은 원본 리포트를 다시 열어 스텝·에러에서 생성 (lib/jira-export.js).
+const jiraExport = require('./lib/jira-export');
+const JIRA_HEADER = ['No', 'Issue Type', '스위트', 'Summary', 'Description', '스펙 파일:라인', '스크린샷 파일', 'JIRA', 'Link'];
+
+app.post('/api/projects/:id/jira-export', async (req, res) => {
+  const db = loadDB();
+  const project = db.projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
+  const format = (req.body && req.body.format) === 'gsheet' ? 'gsheet' : 'xlsx';
+  if (!items.length) return res.status(400).json({ error: '선택된 항목이 없습니다.' });
+
+  const publicBase = `${req.protocol}://${req.get('host')}`;
+  const indexCache = new Map(); // 리포트 임베드 zip 은 내보내기당 1회만 연다
+  const byExchange = new Map();
+  const skipped = [];
+
+  for (const it of items) {
+    const tcId = String((it && it.tcId) || '').trim();
+    const exchange = String((it && it.exchange) || '').trim() || null;
+    if (!tcId) continue;
+    // 취합 조인 규칙과 동일 — 거래소 없는 레코드는 모든 거래소 행에 조인되므로 함께 허용
+    const rec = db.records.filter(r => r.projectId === project.id && r.tcId === tcId &&
+      r.source === 'automation' && r.result === 'Fail' && r.testId && r.reportDirRel &&
+      (!exchange || !r.exchange || r.exchange === exchange)).pop();
+    if (!rec) { skipped.push({ tcId, exchange, reason: '자동화 Fail 레코드 없음 (매뉴얼 전용 TC 는 추후 확장)' }); continue; }
+    try {
+      const src = (db.sources || []).find(s => s.id === rec.sourceId);
+      const row = jiraExport.buildRow(rec, { reportsBaseAbs: REPORTS_DIR, publicBase, indexCache, suiteName: src && src.filename });
+      const key = exchange || rec.exchange || '미지정';
+      if (!byExchange.has(key)) byExchange.set(key, []);
+      byExchange.get(key).push({ ...row, tcId });
+    } catch (e) {
+      skipped.push({ tcId, exchange, reason: e.message });
+    }
+  }
+
+  if (!byExchange.size) return res.status(400).json({ error: '내보낼 수 있는 항목이 없습니다.', skipped });
+
+  const toAoa = rows => [JIRA_HEADER, ...rows.map((r, i) =>
+    [i + 1, r.issueType, r.suite, r.summary, r.description, r.specLoc, r.screenshot, r.jira, r.link])];
+  const stamp = new Date().toISOString().slice(0, 10);
+  const title = `[Jira 등록] ${project.name} ${stamp}`;
+
+  if (format === 'xlsx') {
+    const wb = XLSX.utils.book_new();
+    for (const [ex, rows] of byExchange) {
+      const ws = XLSX.utils.aoa_to_sheet(toAoa(rows));
+      ws['!cols'] = [{ wch: 4 }, { wch: 9 }, { wch: 26 }, { wch: 34 }, { wch: 80 }, { wch: 36 }, { wch: 44 }, { wch: 6 }, { wch: 24 }];
+      XLSX.utils.book_append_sheet(wb, ws, ex.slice(0, 31)); // 시트명 31자 제한(xlsx 규격)
+    }
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(title)}.xlsx`);
+    res.setHeader('X-Jira-Export-Skipped', encodeURIComponent(JSON.stringify(skipped)));
+    return res.send(buf);
+  }
+
+  // Google Spreadsheet 생성 — tcgen 통합 토큰(scope: auth/spreadsheets) 재사용
+  const oauth2Client = await getGoogleAuthForRequest(req);
+  if (!oauth2Client) return res.status(401).json({ error: 'Google 로그인이 필요합니다.' });
+  try {
+    const sheetsApi = google.sheets({ version: 'v4', auth: oauth2Client });
+    const exchanges = [...byExchange.keys()];
+    const created = await sheetsApi.spreadsheets.create({
+      requestBody: {
+        properties: { title },
+        sheets: exchanges.map(ex => ({ properties: { title: ex.slice(0, 90) } })),
+      },
+    });
+    await sheetsApi.spreadsheets.values.batchUpdate({
+      spreadsheetId: created.data.spreadsheetId,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data: exchanges.map(ex => ({ range: `'${ex.slice(0, 90)}'!A1`, values: toAoa(byExchange.get(ex)) })),
+      },
+    });
+    res.json({
+      url: created.data.spreadsheetUrl,
+      counts: Object.fromEntries(exchanges.map(ex => [ex, byExchange.get(ex).length])),
+      skipped,
+    });
+  } catch (e) {
+    res.status(502).json({ error: `Google Sheets 생성 실패: ${e.message}`, skipped });
+  }
+});
+
 // 취합 대시보드 위젯 고정/해제 — project.pinnedWidgets (프로젝트 스코프, 전체 열람자 공유)
 const CONS_WIDGET_KEYS = ['exchangeStats'];
 
