@@ -150,7 +150,8 @@ function toggleLauncher(e) {
       b.appendChild(cur);
     } else {
       if (appDef.external_auth) b.title = '별도 로그인이 필요합니다';
-      b.onclick = () => { window.location.href = appDef.url; };
+      // 다른 서비스는 새 탭 — 진행 중 작업(보드 기입 등) 보존. noopener 로 opener 연결 차단
+      b.onclick = () => { window.open(appDef.url, '_blank', 'noopener'); closeLauncher(); };
     }
     wrap.appendChild(b);
   });
