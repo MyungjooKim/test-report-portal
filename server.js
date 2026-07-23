@@ -191,6 +191,30 @@ const uploadConsolidate = multer({
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 }
 });
 
+// ── 청크 업로드 — Cloudflare 요청 본문 100MB 제한 우회 ──
+// 클라이언트가 파일을 64MB 조각으로 나눠 보내면 서버가 재조립해 REPORTS_DIR 에 스테이징한다.
+const chunkStore = require('./lib/chunk-store');
+const uploadChunk = multer({ storage: multer.memoryStorage(), limits: { fileSize: 96 * 1024 * 1024 } });
+const STAGED_EXT_RE = /\.(zip|xlsx|xls|csv|html|md|mmd|mermaid)$/i;
+
+// 청크로 스테이징된 파일을 multer req.files 항목과 같은 형태로 합류시킨다.
+// originalname 은 multer 의 latin1 관례에 맞춰 인코딩해 둔다 — 다운스트림에서 utf8 로 복원됨.
+function collectStagedFiles(req) {
+  let list;
+  try { list = JSON.parse((req.body && req.body.stagedFiles) || '[]'); } catch (_) { return []; }
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const s of list) {
+    const stagedName = String((s && s.stagedName) || '');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[a-z0-9]+$/i.test(stagedName)) continue;
+    if (!STAGED_EXT_RE.test(stagedName)) continue;
+    if (!fs.existsSync(path.join(REPORTS_DIR, stagedName))) continue;
+    const originalName = String((s && s.originalName) || stagedName);
+    out.push({ filename: stagedName, originalname: Buffer.from(originalName, 'utf8').toString('latin1') });
+  }
+  return out;
+}
+
 // HTML 은 자산 URL(?v=__V__)에 앱 버전을 주입해 서빙 — 배포 시 URL 이 바뀌어
 // Cloudflare 엣지·브라우저 캐시(Browser Cache TTL 4h)를 확실히 무효화한다.
 const APP_PKG_VERSION = require('./package.json').version;
@@ -656,16 +680,42 @@ app.get('/api/projects/:id/reports', (req, res) => {
   res.json(grouped);
 });
 
+// ── 청크 업로드 API — 큰 파일을 조각으로 받아 재조립 스테이징 ──
+app.post('/api/uploads/chunk', uploadChunk.single('chunk'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: '청크 데이터가 없습니다.' });
+    chunkStore.saveChunk(REPORTS_DIR, req.body.uploadId, req.body.chunkIndex, req.file.buffer);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/uploads/complete', (req, res) => {
+  try {
+    chunkStore.cleanStale(REPORTS_DIR);
+    const { uploadId, totalChunks, filename } = req.body || {};
+    const ext = path.extname(String(filename || '')).toLowerCase();
+    if (!STAGED_EXT_RE.test(ext)) return res.status(400).json({ error: 'ZIP·XLSX·CSV·HTML·MD 형식만 업로드할 수 있습니다.' });
+    const stagedName = `${uuidv4()}${ext}`;
+    chunkStore.completeUpload(REPORTS_DIR, uploadId, totalChunks, stagedName);
+    res.json({ stagedName });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // 리포트 업로드
 app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
   const db = loadDB();
   const project = db.projects.find(p => p.id === req.params.id);
   if (!project) return res.status(404).json({ error: '프로젝트를 찾을 수 없습니다.' });
+  const inputFiles = [...(req.files || []), ...collectStagedFiles(req)];
 
   // 결과형 프로젝트 — 파일 업로드 탭도 공통 진입점(§11): Playwright ZIP 자동 감지 → 취합 소스로 등록
   if (project.type === 'result') {
-    if (!req.files || req.files.length === 0) return res.status(400).json({ error: '업로드된 파일이 없습니다.' });
-    const { addedSources, skipped } = registerPlaywrightSources(db, project, req.files, {
+    if (inputFiles.length === 0) return res.status(400).json({ error: '업로드된 파일이 없습니다.' });
+    const { addedSources, skipped } = registerPlaywrightSources(db, project, inputFiles, {
       uploadedBy: req.body.uploadedBy,
       sessionEmail: req.session.googleUser && req.session.googleUser.email,
     });
@@ -679,7 +729,7 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
   const newReports = [];
   const notices = [];
 
-  for (const file of req.files) {
+  for (const file of inputFiles) {
     const ext = path.extname(file.originalname).toLowerCase();
     const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
 
@@ -1059,9 +1109,10 @@ app.post('/api/projects/:id/consolidate/preview', uploadConsolidate.array('files
 
   const items = [];
   const skipped = [];
+  const inputFiles = [...(req.files || []), ...collectStagedFiles(req)];
 
   // 1) 파일 입력 — ZIP(Playwright) / XLSX·CSV(매뉴얼) 자동 감지 (§11 ① 양식 감지)
-  for (const file of req.files || []) {
+  for (const file of inputFiles) {
     const ext = path.extname(file.originalname).toLowerCase();
     const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
 

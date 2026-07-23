@@ -1,6 +1,16 @@
 # Changelog
 
-## [0.9.0] - 2026-07-17
+## [0.12.0] - 2026-07-23
+
+### Fixed — 운영(tr.rgrg.im) 100MB 초과 업로드 실패 (Cloudflare 요청 본문 제한)
+- 증상: 결과 소스 업로드 위저드에서 대용량 ZIP `분석 →` 시 `ERR_CONNECTION_CLOSED` 로 즉시 실패
+  — 요청이 서버에 도달하지 못하고 Cloudflare 프록시(무료 플랜 100MB 제한)에서 차단된 것
+- 해결: 청크 업로드 도입 — 클라이언트가 파일을 64MB 조각으로 나눠 전송, 서버가 재조립해 스테이징
+  - 신규 API: `POST /api/uploads/chunk`(조각 수신) · `POST /api/uploads/complete`(재조립, stagedName 발급)
+  - `consolidate/preview`·`reports` 업로드가 `stagedFiles`(스테이징 참조)를 기존 multipart 와 동일하게 처리
+  - `lib/chunk-store.js` — 누락 청크 검증, 경로 조작 차단, 미완성 업로드 1시간 TTL 정리 (테스트 5종)
+- UX: 업로드 진행률 오버레이(파일 n/m · %) + 연결 끊김 시 원인 있는 에러 메시지
+
 
 ### Added — 서비스 선택 허브(service-hub) 연동
 - 9-dot 런처가 tcgen `/apps` registry 를 단일 소스로 소비 (`/api/apps` 프록시, 쿠키 포워딩)
