@@ -24,6 +24,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 사용자 정보 로드 + 프로젝트 로드
   loadUserInfo();
+  loadRuns();
   loadProjects().then(() => handleNavigation());
 });
 
@@ -148,7 +149,9 @@ function toggleLauncher(e) {
       cur.textContent = '● 사용 중';
       b.appendChild(cur);
     } else {
-      b.onclick = () => { window.location.href = appDef.url; };
+      if (appDef.external_auth) b.title = '별도 로그인이 필요합니다';
+      // 다른 서비스는 새 탭 — 진행 중 작업(보드 기입 등) 보존. noopener 로 opener 연결 차단
+      b.onclick = () => { window.open(appDef.url, '_blank', 'noopener'); closeLauncher(); };
     }
     wrap.appendChild(b);
   });
@@ -221,16 +224,26 @@ function handleNavigation() {
   if (parts[0] === 'project' && parts[1]) {
     const projectId = parts[1];
     currentProjectId = projectId;
+    currentRunId = null;
     renderProjectList();
+    renderRunList();
 
     if (parts[2] === 'report' && parts[3]) {
       loadAndShowReport(projectId, parts[3]);
     } else {
       showProjectView(projectId);
     }
+  } else if (parts[0] === 'run' && parts[1]) {
+    currentProjectId = null;
+    currentRunId = parts[1];
+    renderProjectList();
+    renderRunList();
+    showRunView(parts[1]);
   } else {
     currentProjectId = null;
+    currentRunId = null;
     renderProjectList();
+    renderRunList();
     showView('dashboard');
   }
 }
@@ -2674,7 +2687,7 @@ document.addEventListener('change', (e) => {
 
 // ===== View Switching =====
 function showView(viewId) {
-  ['dashboard', 'projectView', 'reportViewer', 'searchView'].forEach(id => {
+  ['dashboard', 'projectView', 'reportViewer', 'searchView', 'runView'].forEach(id => {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   });
   if (viewId !== 'reportViewer') {
@@ -2925,4 +2938,834 @@ function highlightKeywords(text, query) {
 function goToSearchResult(projectId, reportId) {
   currentProjectId = projectId;
   navigateTo(`#project/${projectId}/report/${reportId}`);
+}
+
+// ===== 테스트 수행 보드 (test-run R1) =====
+// 진행 중 작업공간 — TC 행 × 거래소 축, 거래소당 자동🤖/수동✋/최종 3칸.
+// 모든 기입은 서버 append-only 이벤트, 화면은 변경 셀(행)만 부분 패치 (침입 방지 원칙).
+let runListData = [];
+let currentRunId = null;
+let currentRun = null;
+let runStaleOnly = false;
+let runSearchQ = '';
+let runCollapsedSuites = new Set(); // Suite(시트) 섹션 접힘 상태 — 보드 로드 시 초기화
+
+const RUN_RESULTS = ['Pass', 'Fail', 'Blocked', 'N/T', 'N/A'];
+
+function exKeysOf(run) {
+  return (run.exchanges && run.exchanges.length) ? run.exchanges : [''];
+}
+
+function exLabel(ex) {
+  return ex || '결과';
+}
+
+// ── 사이드바 보드 목록 ──
+async function loadRuns() {
+  const list = await api('/api/runs');
+  if (Array.isArray(list)) runListData = list;
+  renderRunList();
+}
+
+// 그룹(1단계) 접힘 상태 — 세션 간 유지 (localStorage)
+function runGroupCollapsedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem('runGroupsCollapsed') || '[]')); } catch (_) { return new Set(); }
+}
+function toggleRunGroup(name) {
+  const set = runGroupCollapsedSet();
+  if (set.has(name)) set.delete(name); else set.add(name);
+  localStorage.setItem('runGroupsCollapsed', JSON.stringify([...set]));
+  renderRunList();
+}
+
+function runItemHtml(r, indent) {
+  const s = r.summary || { filled: 0, total: 0, fail: 0 };
+  const closed = r.status === 'closed';
+  return `
+    <li class="run-item ${indent ? 'run-item-child' : ''} ${r.id === currentRunId ? 'active' : ''} ${closed ? 'run-closed' : ''}" onclick="selectRun('${r.id}')">
+      <span class="run-item-icon">${closed ? '🔒' : '🧪'}</span>
+      <span class="tree-name">${escapeHtml(r.name)}</span>
+      ${s.fail ? `<span class="run-fail-dot" title="Fail ${s.fail}건">${s.fail}</span>` : ''}
+      <span class="report-count">${s.filled}/${s.total}</span>
+    </li>`;
+}
+
+function renderRunList() {
+  const el = document.getElementById('runList');
+  if (!el) return;
+  if (!runListData.length) {
+    el.innerHTML = '<li class="run-list-empty">아직 보드가 없습니다</li>';
+    return;
+  }
+  // 그룹(1단계) 구조 — 그룹은 첫 등장 순서, 그룹 없는 보드는 그 자리에 단독 표시
+  const collapsed = runGroupCollapsedSet();
+  const seenGroups = new Set();
+  let html = '';
+  for (const r of runListData) {
+    if (!r.group) { html += runItemHtml(r, false); continue; }
+    if (seenGroups.has(r.group)) continue;
+    seenGroups.add(r.group);
+    const members = runListData.filter(x => x.group === r.group);
+    const agg = members.reduce((a, m) => {
+      const s = m.summary || { filled: 0, total: 0, fail: 0 };
+      a.filled += s.filled; a.total += s.total; a.fail += s.fail;
+      return a;
+    }, { filled: 0, total: 0, fail: 0 });
+    const isCollapsed = collapsed.has(r.group);
+    const hasActive = members.some(m => m.id === currentRunId);
+    // 접힘 상태는 항상 존중 — 활성 보드가 안에 있으면 헤더에 표시만 남긴다
+    // (이전의 "활성 그룹 강제 펼침"은 접기 클릭이 안 먹는 것처럼 보이는 버그를 만들었음)
+    html += `
+      <li class="run-group-head ${isCollapsed && hasActive ? 'active' : ''}" onclick="toggleRunGroup('${escapeAttr(r.group)}')" title="클릭하여 ${isCollapsed ? '펼치기' : '접기'}">
+        <span class="tree-toggle ${isCollapsed ? '' : 'expanded'}">▶</span>
+        <span class="run-item-icon">📁</span>
+        <span class="tree-name">${escapeHtml(r.group)}</span>
+        ${agg.fail ? `<span class="run-fail-dot" title="Fail ${agg.fail}건">${agg.fail}</span>` : ''}
+        <span class="report-count">${agg.filled}/${agg.total}</span>
+      </li>`;
+    if (!isCollapsed) html += members.map(m => runItemHtml(m, true)).join('');
+  }
+  el.innerHTML = html;
+}
+
+function selectRun(id) {
+  navigateTo(`#run/${id}`);
+}
+
+// ── 보드 화면 ──
+async function showRunView(id) {
+  showView('runView');
+  const wrap = document.getElementById('runGridWrap');
+  wrap.innerHTML = '<div class="empty-state"><div class="empty-icon">⏳</div><p>보드를 불러오는 중…</p></div>';
+  const data = await api(`/api/runs/${id}`);
+  if (!data || data.error) {
+    wrap.innerHTML = `<div class="empty-state"><p>${escapeHtml((data && data.error) || '보드를 불러오지 못했습니다.')}</p></div>`;
+    return;
+  }
+  currentRun = data;
+  runStaleOnly = false;
+  runSearchQ = '';
+  // 대량 보드(tc-man 스냅샷 등)는 Suite 섹션 기본 접힘 — 헤더 요약으로 조망 후 펼쳐서 작업
+  runCollapsedSuites = new Set();
+  const suiteKeys = new Set((data.tcs || []).map(t => t.sheet || '(기타)'));
+  if ((data.tcs || []).length > 200 && suiteKeys.size > 1) runCollapsedSuites = new Set(suiteKeys);
+  renderRunHeader();
+  renderRunSummary();
+  renderRunToolbar();
+  renderRunGrid();
+}
+
+function renderRunHeader() {
+  const r = currentRun;
+  document.getElementById('runTitle').innerHTML = `
+    <span class="editable-title" ondblclick="renameRun()">${escapeHtml(r.name)}</span>
+    <button class="btn-edit-name" onclick="renameRun()" title="이름 수정">✏️</button>`;
+
+  const stale = r.versionHistory && r.versionHistory.length
+    ? `<span class="run-chip run-chip-hint" title="이전 버전: ${escapeHtml(r.versionHistory.map(v => v.version || '(미지정)').join(' → '))}">이력 ${r.versionHistory.length}</span>` : '';
+  document.getElementById('runMeta').innerHTML = `
+    <span class="run-chip run-chip-version" onclick="changeRunGroup()" title="클릭하여 그룹 변경 — 사이드바에서 같은 그룹끼리 묶입니다">📁 ${escapeHtml(r.group || '그룹 없음')}</span>
+    ${r.snapshot ? `<span class="run-chip" title="테스트 주기 (불변)">📅 ${escapeHtml(r.snapshot)}</span>` : ''}
+    <span class="run-chip run-chip-version" onclick="changeRunVersion()" title="클릭하여 대상 버전 변경 — 기존 결과는 유지되고 ⚠ 재검 배지가 붙습니다">🏷 ${escapeHtml(r.targetVersion || '버전 미지정')}</span>
+    ${stale}
+    <span class="run-chip">${r.exchanges && r.exchanges.length ? escapeHtml(r.exchanges.join(' · ')) : '거래소 축 없음'}</span>
+    ${r.status === 'closed' ? '<span class="run-chip run-chip-closed">🔒 닫힘</span>' : ''}
+    ${publishedChip(r)}`;
+
+  // 발행 정책(2026-07-23 개정): 미발행 = 신규 프로젝트 생성 발행 / 발행됨 = 연결된 곳으로만 재발행
+  // + 새 프로젝트로 다시 발행 가능. 기존 프로젝트 선택 경로는 없음(오발송 방지).
+  const publishBtns = r.publishedTo
+    ? `<button class="btn btn-primary" onclick="republishRun()" title="연결된 결과 대시보드에 현재 보드 상태를 반영합니다 (이전 반영분 교체)">📊 대시보드 갱신</button>
+       <button class="btn btn-secondary" onclick="openPublishRunModal()" title="결과 대시보드를 새로 하나 더 만듭니다 — 갱신 연결이 새 대시보드로 이동합니다">새 대시보드 만들기…</button>`
+    : `<button class="btn btn-primary" onclick="openPublishRunModal()" title="보드의 최종 결과로 취합 대시보드(결과형 프로젝트)를 만듭니다">📊 결과 대시보드 만들기</button>`;
+  document.getElementById('runActions').innerHTML = `
+    ${publishBtns}
+    <button class="btn btn-secondary" onclick="toggleRunStatus()">${r.status === 'closed' ? '보드 다시 열기' : '보드 닫기'}</button>
+    <button class="btn btn-danger-outline" onclick="deleteRun()">🗑 삭제</button>`;
+}
+
+// ── 결과형으로 발행 (R3 — A안) ──
+// 발행 이후 기입분은 재발행으로 갱신 — 칩으로 발행 시각을 보여 재발행 필요를 알린다
+function publishedChip(r) {
+  if (!r.publishedTo) return '';
+  const p = findProjectInTree(projectTree, r.publishedTo.projectId);
+  const name = p ? p.name : '(삭제된 프로젝트)';
+  const chip = `📊 결과 대시보드: ${escapeHtml(name)} · ${formatTime(r.publishedTo.at)} 반영`;
+  return p
+    ? `<span class="run-chip run-chip-version" onclick="selectProject('${p.id}')" title="결과 대시보드 열기">${chip}</span>`
+    : `<span class="run-chip run-chip-hint">${chip}</span>`;
+}
+
+// 폴더 위치 옵션 — 최상위 + 깊이 2 미만 노드(새 프로젝트가 3단계를 넘지 않도록)
+function publishParentOptions() {
+  const opts = ['<option value="">(최상위)</option>'];
+  const walk = (nodes, depth, prefix) => {
+    for (const n of nodes || []) {
+      if (depth < 2) opts.push(`<option value="${n.id}">${prefix}${escapeHtml(n.name)}</option>`);
+      if (n.children) walk(n.children, depth + 1, prefix + '· ');
+    }
+  };
+  walk(projectTree, 0, '');
+  return opts.join('');
+}
+
+function openPublishRunModal() {
+  // 대시보드 이름 기본값 — 그룹이 있으면 맥락 포함 (예: "7월말 Epic#19-모바일")
+  document.getElementById('publishName').value = currentRun.group ? `${currentRun.group}-${currentRun.name}` : currentRun.name;
+  document.getElementById('publishParentSelect').innerHTML = publishParentOptions();
+  openModal('publishRunModal');
+  setTimeout(() => document.getElementById('publishName').focus(), 100);
+}
+
+async function callPublish(body) {
+  const d = await api(`/api/runs/${currentRun.id}/publish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '발행 실패'), 'error'); return null; }
+  currentRun.publishedTo = { projectId: d.projectId, at: new Date().toISOString(), sourceId: d.sourceId };
+  return d;
+}
+
+// 신규 발행 — 새 결과형 프로젝트 생성 + 발행 (모달)
+async function publishRun() {
+  const name = document.getElementById('publishName').value.trim();
+  if (!name) { showToast('프로젝트 이름을 입력해 주세요.', 'error'); return; }
+  const btn = document.getElementById('publishRunBtn');
+  btn.disabled = true;
+  btn.textContent = '발행 중...';
+  try {
+    const d = await callPublish({ mode: 'new', name, parentId: document.getElementById('publishParentSelect').value || null });
+    if (!d) return;
+    closeModal('publishRunModal');
+    await loadProjects(); // 사이드바에 새 결과형 프로젝트 반영
+    renderRunHeader();
+    showToast(`✅ 결과 대시보드 생성 완료 — "${name}" · ${d.rowCount}행 반영`, 'success');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '대시보드 만들기';
+  }
+}
+
+// 재발행 — 연결된 프로젝트로 원클릭 (이전 발행분 교체)
+async function republishRun() {
+  const d = await callPublish({ mode: 'republish' });
+  if (!d) return;
+  renderRunHeader();
+  showToast(`✅ 결과 대시보드 갱신 완료 — ${d.rowCount}행 반영 (이전 반영분 교체)`, 'success');
+}
+
+function renderRunSummary() {
+  const s = currentRun.summary || { total: 0, filled: 0, fail: 0, perExchange: {} };
+  const pct = s.total ? Math.round(s.filled / s.total * 100) : 0;
+  const exs = exKeysOf(currentRun);
+  const perEx = exs.map(ex => {
+    const e = (s.perExchange && s.perExchange[ex]) || { total: 0, filled: 0, fail: 0 };
+    const p = e.total ? Math.round(e.filled / e.total * 100) : 0;
+    return `<span class="run-sum-ex">${escapeHtml(exLabel(ex))} <b>${p}%</b>${e.fail ? ` <i class="run-sum-fail">F${e.fail}</i>` : ''}</span>`;
+  }).join('');
+  document.getElementById('runSummary').innerHTML = `
+    <div class="run-sum-band">
+      <span class="run-sum-main">진행 <b>${s.filled}</b>/${s.total} (${pct}%)</span>
+      <span class="run-sum-main ${s.fail ? 'run-sum-fail' : ''}">Fail <b>${s.fail}</b></span>
+      <span class="run-sum-sep"></span>
+      ${perEx}
+    </div>`;
+}
+
+function renderRunToolbar() {
+  document.getElementById('runToolbar').innerHTML = `
+    <input type="text" class="form-input run-search" placeholder="🔍 TC ID·제목 필터" value="${escapeHtml(runSearchQ)}"
+      oninput="runSearchQ = this.value; renderRunGrid();">
+    <label class="run-stale-toggle" title="현재 대상 버전 이전에 기록된 결과만 표시">
+      <input type="checkbox" ${runStaleOnly ? 'checked' : ''} onchange="runStaleOnly = this.checked; renderRunGrid();"> ⚠ 재검 필요만
+    </label>
+    <span class="run-tc-count">${(currentRun.tcs || []).length} TC</span>`;
+}
+
+// 구버전 스탬프 여부 — 결정값(Pass/Fail/Blocked/N/A)이 현재 대상 버전 이전 기록이면 재검 대상
+function isStaleEntry(entry) {
+  return !!(entry && entry.result && entry.result !== 'N/T' && entry.version
+    && currentRun.targetVersion && entry.version !== currentRun.targetVersion);
+}
+
+function cellHasStale(cell) {
+  return isStaleEntry(cell.auto) || isStaleEntry(cell.manual)
+    || (cell.final && cell.final.source === 'confirmed' && isStaleEntry(cell.final));
+}
+
+function runRowVisible(tc) {
+  if (runSearchQ) {
+    const q = runSearchQ.toLowerCase();
+    const hay = `${tc.tcId} ${tc.title || ''} ${tc.category1 || ''} ${tc.category2 || ''}`.toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  if (runStaleOnly) {
+    return exKeysOf(currentRun).some(ex => tc.cells[ex] && cellHasStale(tc.cells[ex]));
+  }
+  return true;
+}
+
+function runResBadge(result, opts = {}) {
+  if (!result) return '<span class="run-empty">—</span>';
+  const stale = opts.stale ? ` <span class="run-stale" title="이전 버전(${escapeHtml(opts.version || '')}) 기록 — 재검 필요">⚠</span>` : '';
+  const title = opts.version ? ` title="@${escapeHtml(opts.version)}"` : '';
+  return `<span class="res-badge res-${String(result).replace('/', '')}"${title}>${escapeHtml(result)}</span>${stale}`;
+}
+
+function runPrioChip(p) {
+  if (!p) return '<span class="run-empty">—</span>';
+  return `<span class="run-prio run-prio-${p.toLowerCase()}">${p}</span>`;
+}
+
+function runAutomationBadge(tc) {
+  if (tc.coveragePct != null) {
+    return `<span class="run-cov" title="${escapeHtml(tc.automation || '')} ${escapeHtml(tc.coverageNote || '')}">🤖 ${tc.coveragePct}%</span>`;
+  }
+  if (tc.automation) return `<span class="run-cov run-cov-dim" title="Coverage % 미기재">🤖 ${escapeHtml(tc.automation)}</span>`;
+  return '<span class="run-empty">—</span>';
+}
+
+// 수동 칸 — 드롭다운 (Pass/Fail/Blocked/N/T/N/A, 취합과 동일 어휘)
+function runManualSelect(tci, exi, cell, disabled) {
+  const cur = cell.manual && cell.manual.result || '';
+  const cls = cur ? ` res-${cur.replace('/', '')}` : '';
+  const stale = isStaleEntry(cell.manual)
+    ? `<span class="run-stale" title="이전 버전(${escapeHtml(cell.manual.version || '')}) 기록 — 재검 필요">⚠</span>` : '';
+  const opts = [`<option value="" disabled hidden ${cur ? '' : 'selected'}>—</option>`]
+    .concat(RUN_RESULTS.map(v => `<option value="${v}" ${v === cur ? 'selected' : ''}>${v}</option>`)).join('');
+  const tip = cell.manual ? ` title="${escapeHtml(cell.manual.by || '')} · ${formatTime(cell.manual.at)}${cell.manual.version ? ' · @' + escapeHtml(cell.manual.version) : ''}"` : '';
+  return `<select class="run-select${cls}" data-tci="${tci}" data-exi="${exi}" data-slot="manual" ${disabled ? 'disabled' : ''}${tip}>${opts}</select>${stale}`;
+}
+
+// 최종 칸 — 기본은 자동 파생(⚙), 사람이 덮어쓰면 확정(👤). 해제하면 파생으로 복귀.
+function runFinalSelect(tci, exi, cell, disabled) {
+  const fin = cell.final || { result: 'N/T', source: 'derived' };
+  const confirmed = fin.source === 'confirmed';
+  const cls = ` res-${String(fin.result).replace('/', '')}`;
+  const derivedLabel = confirmed ? '↺ 자동 파생으로' : `⚙ ${fin.result}`;
+  const opts = [`<option value="" ${confirmed ? '' : 'selected'}>${derivedLabel}</option>`]
+    .concat(RUN_RESULTS.map(v => `<option value="${v}" ${confirmed && v === fin.result ? 'selected' : ''}>👤 ${v}</option>`)).join('');
+  const badge = fin.badge ? `<span class="run-progress-badge" title="부분 커버리지 자동 통과 — 수동 검증 필요">${escapeHtml(fin.badge)}</span>` : '';
+  const stale = confirmed && isStaleEntry(fin)
+    ? `<span class="run-stale" title="이전 버전(${escapeHtml(fin.version || '')}) 확정 — 재검 필요">⚠</span>` : '';
+  const tip = confirmed ? ` title="수동 확정: ${escapeHtml(fin.by || '')} · ${formatTime(fin.at)}"` : ' title="자동 파생 — 드롭다운으로 수동 확정 가능"';
+  return `<select class="run-select run-select-final${cls} ${confirmed ? 'run-confirmed' : ''}" data-tci="${tci}" data-exi="${exi}" data-slot="final" ${disabled ? 'disabled' : ''}${tip}>${opts}</select>${badge}${stale}`;
+}
+
+function runCellsHtml(tci, tc) {
+  const exs = exKeysOf(currentRun);
+  const closed = currentRun.status === 'closed';
+  return exs.map((ex, exi) => {
+    // 대상 거래소가 명시된 TC 는 대상 외 셀 비활성 (plan §TC 양식)
+    if (ex && tc.targetExchanges && tc.targetExchanges.length && !tc.targetExchanges.includes(ex)) {
+      return '<td class="run-cell run-cell-off" colspan="3" title="대상 거래소 아님">—</td>';
+    }
+    const cell = tc.cells[ex] || { auto: null, manual: null, final: { result: 'N/T', source: 'derived' }, events: 0 };
+    const autoHtml = runResBadge(cell.auto && cell.auto.result, {
+      stale: isStaleEntry(cell.auto), version: cell.auto && cell.auto.version,
+    });
+    const memoCls = cell.events ? 'run-memo has-memo' : 'run-memo';
+    return `
+      <td class="run-cell run-cell-auto">${autoHtml}</td>
+      <td class="run-cell">${runManualSelect(tci, exi, cell, closed)}</td>
+      <td class="run-cell run-cell-final">${runFinalSelect(tci, exi, cell, closed)}
+        <button class="${memoCls}" data-tci="${tci}" data-exi="${exi}" title="메모·이력">💬${cell.events || ''}</button>
+      </td>`;
+  }).join('');
+}
+
+function runRowHtml(tci) {
+  const tc = currentRun.tcs[tci];
+  return `
+    <td class="run-tc" data-tci="${tci}" title="클릭하여 사전조건·스텝·기대결과 열기">
+      <span class="run-tc-id">${escapeHtml(tc.tcId)}</span>
+      ${tc.smoke ? '<span class="run-smoke" title="smoke">🔥</span>' : ''}
+      <div class="run-tc-title">${escapeHtml(tc.title || '')}</div>
+    </td>
+    <td class="run-cell-prio">${runPrioChip(tc.priority)}</td>
+    <td class="run-cell-autocov">${runAutomationBadge(tc)}</td>
+    ${runCellsHtml(tci, tc)}`;
+}
+
+// Suite(시트) 단위 진행 요약 — 섹션 헤더용. 접힌 채로도 현황 파악 가능하게.
+function suiteProgress(idxs) {
+  const exs = exKeysOf(currentRun);
+  const st = { total: 0, filled: 0, fail: 0 };
+  for (const tci of idxs) {
+    const tc = currentRun.tcs[tci];
+    for (const ex of exs) {
+      if (ex && tc.targetExchanges && tc.targetExchanges.length && !tc.targetExchanges.includes(ex)) continue;
+      st.total++;
+      const fin = tc.cells[ex] && tc.cells[ex].final ? tc.cells[ex].final.result : 'N/T';
+      if (fin !== 'N/T') st.filled++;
+      if (fin === 'Fail') st.fail++;
+    }
+  }
+  return st;
+}
+
+function renderRunGrid() {
+  const wrap = document.getElementById('runGridWrap');
+  const exs = exKeysOf(currentRun);
+  const colCount = 3 + exs.length * 3;
+
+  const exHead1 = exs.map(ex => `<th colspan="3" class="run-ex-head">${escapeHtml(exLabel(ex))}</th>`).join('');
+  const exHead2 = exs.map(() => '<th class="run-sub-head">자동 🤖</th><th class="run-sub-head">수동 ✋</th><th class="run-sub-head">최종</th>').join('');
+
+  // 그리드 3단: Suite(시트) 섹션 > 대분류›중분류 그룹 > TC 행 — 시트 1개면 섹션 생략(현행 유지)
+  const suiteOrder = [];
+  const bySuite = new Map();
+  (currentRun.tcs || []).forEach((tc, tci) => {
+    const key = tc.sheet || '(기타)';
+    if (!bySuite.has(key)) { bySuite.set(key, []); suiteOrder.push(key); }
+    bySuite.get(key).push(tci);
+  });
+  const multiSuite = suiteOrder.length > 1;
+
+  let body = '';
+  let visible = 0;
+  for (const suite of suiteOrder) {
+    const idxs = bySuite.get(suite);
+    const visibleIdxs = idxs.filter(i => runRowVisible(currentRun.tcs[i]));
+    if (multiSuite && !visibleIdxs.length && (runSearchQ || runStaleOnly)) continue; // 필터로 빈 섹션 숨김
+    visible += visibleIdxs.length;
+
+    const collapsed = multiSuite && runCollapsedSuites.has(suite);
+    if (multiSuite) {
+      const st = suiteProgress(idxs);
+      body += `
+        <tr class="run-suite" data-suite="${escapeHtml(suite)}" title="클릭하여 ${collapsed ? '펼치기' : '접기'}">
+          <td colspan="${colCount}">
+            <span class="run-suite-caret">${collapsed ? '▸' : '▾'}</span>
+            <b>${escapeHtml(suite)}</b>
+            <span class="run-suite-stats">${st.filled}/${st.total}${st.fail ? ` · <i>F${st.fail}</i>` : ''} · TC ${idxs.length}</span>
+          </td>
+        </tr>`;
+      if (collapsed) continue;
+    }
+
+    let lastGroup = null;
+    for (const tci of visibleIdxs) {
+      const tc = currentRun.tcs[tci];
+      const group = [tc.category1, tc.category2].filter(Boolean).join(' › ');
+      if (group && group !== lastGroup) {
+        body += `<tr class="run-group"><td colspan="${colCount}">${escapeHtml(group)}</td></tr>`;
+        lastGroup = group;
+      }
+      body += `<tr class="run-row" data-tci="${tci}">${runRowHtml(tci)}</tr>`;
+    }
+  }
+
+  if (!body) {
+    wrap.innerHTML = `<div class="empty-state"><div class="empty-icon">${runStaleOnly ? '✅' : '🔍'}</div><p>${runStaleOnly ? '재검이 필요한 TC 가 없습니다.' : '조건에 맞는 TC 가 없습니다.'}</p></div>`;
+    return;
+  }
+
+  wrap.innerHTML = `
+    <div class="run-grid-scroll">
+      <table class="cons-table run-grid">
+        <thead>
+          <tr>
+            <th rowspan="2" class="run-th-tc">TC</th>
+            <th rowspan="2">중요도</th>
+            <th rowspan="2" title="자동화 커버리지 (TC 양식)">자동화</th>
+            ${exHead1}
+          </tr>
+          <tr>${exHead2}</tr>
+        </thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>`;
+}
+
+// ── 셀 기입 (이벤트 위임) ──
+document.addEventListener('change', async (e) => {
+  const sel = e.target.closest('select.run-select');
+  if (!sel || !currentRun) return;
+  const tci = Number(sel.dataset.tci);
+  const exi = Number(sel.dataset.exi);
+  const slot = sel.dataset.slot;
+  const tc = currentRun.tcs[tci];
+  const ex = exKeysOf(currentRun)[exi];
+  if (!tc) return;
+
+  // 낙관적 반영은 select 자체가 이미 함 — 서버 확정 후 행 부분 패치
+  const resp = await api(`/api/runs/${currentRun.id}/events`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tcId: tc.tcId, exchange: ex, kind: 'result', slot, result: sel.value || null }),
+  });
+  if (!resp || resp.error) {
+    showToast('❌ ' + ((resp && resp.error) || '기입 실패'), 'error');
+    patchRunRow(tci); // 서버 상태(기존 값)로 되돌림
+    return;
+  }
+  tc.cells[ex] = resp.cell;
+  currentRun.summary = resp.summary;
+  patchRunRow(tci, true);
+  renderRunSummary();
+  refreshRunListItem();
+});
+
+// 변경 행만 부분 패치 — 전체 재렌더·스크롤 이동 없음 (침입 방지 원칙 1·4)
+function patchRunRow(tci, flash) {
+  const tr = document.querySelector(`#runGridWrap tr.run-row[data-tci="${tci}"]`);
+  if (!tr) return;
+  tr.innerHTML = runRowHtml(tci);
+  if (flash) {
+    tr.classList.add('run-flash');
+    setTimeout(() => tr.classList.remove('run-flash'), 900);
+  }
+}
+
+// 사이드바 목록의 현재 보드 통계만 동기화
+function refreshRunListItem() {
+  const item = runListData.find(r => r.id === currentRun.id);
+  if (item) { item.summary = currentRun.summary; renderRunList(); }
+}
+
+// ── TC 상세 확장 + 메모 팝오버 (클릭 위임) ──
+document.addEventListener('click', (e) => {
+  const memoBtn = e.target.closest('button.run-memo');
+  if (memoBtn && currentRun) {
+    e.stopPropagation();
+    openCellMemo(Number(memoBtn.dataset.tci), Number(memoBtn.dataset.exi), memoBtn);
+    return;
+  }
+  const suiteRow = e.target.closest('tr.run-suite');
+  if (suiteRow && currentRun) {
+    const suite = suiteRow.dataset.suite;
+    if (runCollapsedSuites.has(suite)) runCollapsedSuites.delete(suite);
+    else runCollapsedSuites.add(suite);
+    renderRunGrid(); // 사용자 조작에 의한 재렌더 — 침입 아님
+    return;
+  }
+  const tcCell = e.target.closest('td.run-tc');
+  if (tcCell && currentRun) {
+    toggleRunDetail(Number(tcCell.dataset.tci), tcCell.closest('tr'));
+    return;
+  }
+  // 팝오버 밖 클릭 → 닫기
+  if (!e.target.closest('#runMemoPopover')) closeCellMemo();
+});
+
+function toggleRunDetail(tci, tr) {
+  const existing = tr.nextElementSibling;
+  if (existing && existing.classList.contains('run-detail') && existing.dataset.tci === String(tci)) {
+    existing.remove();
+    return;
+  }
+  document.querySelectorAll('#runGridWrap tr.run-detail').forEach(el => el.remove());
+  const tc = currentRun.tcs[tci];
+  const colCount = 3 + exKeysOf(currentRun).length * 3;
+  const block = (label, v) => v ? `<div class="run-doc-block"><b>${label}</b><pre>${escapeHtml(v)}</pre></div>` : '';
+  const metaBits = [
+    tc.screenCode ? `화면코드 ${escapeHtml(tc.screenCode)}` : '',
+    tc.programIds ? `Program IDs ${escapeHtml(tc.programIds)}` : '',
+    tc.automation ? `자동화 ${escapeHtml(tc.automation)}` : '',
+    tc.coverageNote ? `Coverage 메모: ${escapeHtml(tc.coverageNote)}` : '',
+  ].filter(Boolean).join(' · ');
+  tr.insertAdjacentHTML('afterend', `
+    <tr class="run-detail" data-tci="${tci}"><td colspan="${colCount}">
+      ${block('사전조건', tc.precondition)}
+      ${block('테스트 스텝', tc.steps)}
+      ${block('기대결과', tc.expected)}
+      ${metaBits ? `<div class="run-doc-meta">${metaBits}</div>` : ''}
+      ${!tc.precondition && !tc.steps && !tc.expected && !metaBits ? '<div class="run-doc-meta">문서 컬럼이 없습니다.</div>' : ''}
+    </td></tr>`);
+}
+
+// ── 셀 메모/이력 팝오버 ──
+let memoCtx = null; // { tci, exi }
+
+async function openCellMemo(tci, exi, anchor) {
+  closeCellMemo();
+  memoCtx = { tci, exi };
+  const tc = currentRun.tcs[tci];
+  const ex = exKeysOf(currentRun)[exi];
+
+  const pop = document.createElement('div');
+  pop.id = 'runMemoPopover';
+  pop.innerHTML = `
+    <div class="memo-head">💬 ${escapeHtml(tc.tcId)}${ex ? ' · ' + escapeHtml(ex) : ''}
+      <button class="modal-close" onclick="closeCellMemo()">✕</button></div>
+    <div class="memo-thread" id="memoThread"><div class="run-empty">불러오는 중…</div></div>
+    ${currentRun.status === 'closed' ? '' : `
+    <div class="memo-input">
+      <textarea id="memoText" rows="2" placeholder="메모 입력…"></textarea>
+      <button class="btn btn-primary btn-sm" onclick="saveCellMemo()">저장</button>
+    </div>`}`;
+  document.body.appendChild(pop);
+
+  // 앵커(💬 버튼) 기준 위치 — 화면 밖으로 나가지 않게 보정
+  const r = anchor.getBoundingClientRect();
+  const W = 340;
+  pop.style.left = Math.max(8, Math.min(window.innerWidth - W - 8, r.right - W)) + 'px';
+  pop.style.top = Math.min(window.innerHeight - 60, r.bottom + 6) + 'px';
+
+  await reloadMemoThread();
+  const ta = document.getElementById('memoText');
+  if (ta) ta.focus();
+}
+
+async function reloadMemoThread() {
+  if (!memoCtx) return;
+  const tc = currentRun.tcs[memoCtx.tci];
+  const ex = exKeysOf(currentRun)[memoCtx.exi];
+  const d = await api(`/api/runs/${currentRun.id}/cell-events?tcId=${encodeURIComponent(tc.tcId)}&exchange=${encodeURIComponent(ex)}`);
+  const el = document.getElementById('memoThread');
+  if (!el) return;
+  const events = (d && d.events) || [];
+  if (!events.length) {
+    el.innerHTML = '<div class="run-empty">아직 기록이 없습니다.</div>';
+    return;
+  }
+  const slotName = { auto: '자동 🤖', manual: '수동 ✋', final: '최종' };
+  el.innerHTML = events.map(ev => {
+    const meta = `<span class="memo-meta">${escapeHtml(ev.by || '')} · ${formatTime(ev.at)}${ev.version ? ' · @' + escapeHtml(ev.version) : ''}</span>`;
+    if (ev.kind === 'note') {
+      return `<div class="memo-item memo-note"><div class="memo-text">${escapeHtml(ev.text)}</div>${meta}</div>`;
+    }
+    // 값 변경 이력 = 시스템 항목 (확정 결정: 이력은 메모 스레드에 자동 기록)
+    const what = ev.result
+      ? `${slotName[ev.slot] || ev.slot} <b class="res-badge res-${String(ev.result).replace('/', '')}">${escapeHtml(ev.result)}</b> 기입`
+      : `${slotName[ev.slot] || ev.slot} 확정 해제 (자동 파생으로 복귀)`;
+    return `<div class="memo-item memo-system"><div class="memo-text">${what}</div>${meta}</div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function saveCellMemo() {
+  const ta = document.getElementById('memoText');
+  if (!ta || !ta.value.trim() || !memoCtx) return;
+  const tc = currentRun.tcs[memoCtx.tci];
+  const ex = exKeysOf(currentRun)[memoCtx.exi];
+  const resp = await api(`/api/runs/${currentRun.id}/events`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tcId: tc.tcId, exchange: ex, kind: 'note', text: ta.value.trim() }),
+  });
+  if (!resp || resp.error) {
+    showToast('❌ ' + ((resp && resp.error) || '메모 저장 실패'), 'error');
+    return;
+  }
+  ta.value = '';
+  tc.cells[ex] = resp.cell;
+  currentRun.summary = resp.summary;
+  patchRunRow(memoCtx.tci);
+  await reloadMemoThread();
+}
+
+function closeCellMemo() {
+  const pop = document.getElementById('runMemoPopover');
+  if (pop) pop.remove();
+  memoCtx = null;
+}
+
+// ── 보드 관리 (이름·버전·상태·삭제) ──
+async function renameRun() {
+  const name = prompt('보드 이름', currentRun.name);
+  if (!name || !name.trim() || name.trim() === currentRun.name) return;
+  const d = await api(`/api/runs/${currentRun.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '수정 실패'), 'error'); return; }
+  currentRun.name = d.name;
+  renderRunHeader();
+  loadRuns();
+}
+
+async function changeRunGroup() {
+  const g = prompt('그룹 이름 (예: 7월말 Epic#19)\n같은 그룹의 보드끼리 사이드바에서 묶입니다. 비우면 그룹 해제.', currentRun.group || '');
+  if (g === null) return;
+  const d = await api(`/api/runs/${currentRun.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group: g }),
+  });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '수정 실패'), 'error'); return; }
+  currentRun.group = g.trim() || null;
+  renderRunHeader();
+  loadRuns();
+}
+
+async function changeRunVersion() {
+  const v = prompt('대상 버전 (현재 테스트 대상 빌드)\n변경해도 기존 결과는 유지되고, 구버전 기록에 ⚠ 재검 배지가 붙습니다.', currentRun.targetVersion || '');
+  if (v === null) return;
+  const d = await api(`/api/runs/${currentRun.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targetVersion: v }),
+  });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '수정 실패'), 'error'); return; }
+  // 배지·요약이 버전 기준으로 바뀌므로 보드 재조회
+  await showRunView(currentRun.id);
+  showToast('🏷 대상 버전이 변경되었습니다. 구버전 기록은 ⚠ 재검 배지로 표시됩니다.', 'success');
+}
+
+async function toggleRunStatus() {
+  const toClosed = currentRun.status !== 'closed';
+  if (toClosed && !confirm('보드를 닫을까요? 닫힌 보드는 기입할 수 없습니다. (다시 열기 가능)')) return;
+  const d = await api(`/api/runs/${currentRun.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: toClosed ? 'closed' : 'active' }),
+  });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '변경 실패'), 'error'); return; }
+  await showRunView(currentRun.id);
+  loadRuns();
+}
+
+async function deleteRun() {
+  if (!confirm('이 수행 보드와 모든 기입 이력을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.')) return;
+  await api(`/api/runs/${currentRun.id}`, { method: 'DELETE' });
+  currentRunId = null;
+  currentRun = null;
+  await loadRuns();
+  navigateTo('#');
+}
+
+// ── 새 보드 생성 모달 — 소스 탭 3개: 파일(기본) / Google Sheets / TC Manager 스냅샷 ──
+let runSelectedFile = null;
+let runTab = 'file';
+let tcmanData = null; // { snapshots, exchanges } — 모달 연 동안 캐시
+
+function switchRunTab(tab) {
+  runTab = tab;
+  const order = ['file', 'gsheet', 'tcman'];
+  document.querySelectorAll('#newRunModal .upload-tab').forEach((el, i) => {
+    el.classList.toggle('active', order[i] === tab);
+  });
+  document.getElementById('runTabFile').classList.toggle('active', tab === 'file');
+  document.getElementById('runTabGsheet').classList.toggle('active', tab === 'gsheet');
+  document.getElementById('runTabTcman').classList.toggle('active', tab === 'tcman');
+  if (tab === 'tcman' && !tcmanData) loadTcmanSnapshots();
+}
+
+async function loadTcmanSnapshots() {
+  const sel = document.getElementById('runTcmanSelect');
+  const hint = document.getElementById('runTcmanHint');
+  sel.innerHTML = '<option value="">불러오는 중…</option>';
+  const d = await api('/api/tcman/snapshots');
+  if (!d || d.error || d.configured === false) {
+    sel.innerHTML = '<option value="">— 사용 불가 —</option>';
+    sel.disabled = true;
+    hint.textContent = d && d.error
+      ? `⚠ ${d.error}`
+      : '⚠ TC Manager 연동이 설정되지 않았습니다 — 서버에 TCMAN_URL / TCMAN_API_KEY 를 설정해 주세요.';
+    return;
+  }
+  tcmanData = d;
+  sel.disabled = false;
+  sel.innerHTML = '<option value="" disabled selected hidden>스냅샷 선택…</option>'
+    + d.snapshots.map(s => {
+      const date = String(s.createdAt).slice(0, 10);
+      // tc-man 스냅샷은 프로젝트 소속(version 은 프로젝트별 유일) — project 가 오면 라벨에 표기 (PR #5)
+      const proj = s.project ? `[${s.project.code || s.project.name}] ` : '';
+      const label = `${proj}${s.version}${s.description ? ' — ' + s.description : ''} · TC ${s.tcCount} · ${date}`;
+      return `<option value="${s.id}">${escapeHtml(label)}</option>`;
+    }).join('');
+  if (!d.snapshots.length) {
+    sel.innerHTML = '<option value="">TC Manager 에 스냅샷이 없습니다</option>';
+    sel.disabled = true;
+  }
+}
+
+// 스냅샷 선택 → 보드 이름·스냅샷(주기)·거래소 축 자동 채움 (비어 있을 때만, 수정 가능)
+document.addEventListener('change', (e) => {
+  if (e.target.id !== 'runTcmanSelect' || !tcmanData) return;
+  const s = tcmanData.snapshots.find(x => x.id === e.target.value);
+  if (!s) return;
+  const nameEl = document.getElementById('runName');
+  if (!nameEl.value.trim()) nameEl.value = s.version + (s.description ? ` (${s.description})` : '');
+  const snapEl = document.getElementById('runSnapshot');
+  if (!snapEl.value.trim()) snapEl.value = s.version;
+  const exEl = document.getElementById('runExchanges');
+  if (!exEl.value.trim() && tcmanData.exchanges && tcmanData.exchanges.length) {
+    exEl.value = tcmanData.exchanges.join(', ');
+  }
+});
+
+function openNewRunModal() {
+  runSelectedFile = null;
+  tcmanData = null;
+  ['runName', 'runGroup', 'runGsheetUrl', 'runSnapshot', 'runTargetVersion', 'runExchanges'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  // 기존 그룹 자동완성
+  document.getElementById('runGroupList').innerHTML =
+    [...new Set(runListData.map(r => r.group).filter(Boolean))].map(g => `<option value="${escapeHtml(g)}">`).join('');
+  document.getElementById('runTcmanSelect').innerHTML = '';
+  switchRunTab('file');
+  document.getElementById('runFileLabel').textContent = '📋 TC 양식 파일(XLSX/CSV)을 드래그하거나 클릭하여 선택';
+  const zone = document.getElementById('runFileZone');
+  if (!zone.dataset.bound) {
+    zone.dataset.bound = '1';
+    const input = document.getElementById('runFileInput');
+    zone.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => setRunFile(input.files[0]));
+    zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+    zone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      zone.classList.remove('dragover');
+      if (e.dataTransfer.files.length) setRunFile(e.dataTransfer.files[0]);
+    });
+  }
+  openModal('newRunModal');
+  setTimeout(() => document.getElementById('runName').focus(), 100);
+}
+
+function setRunFile(file) {
+  if (!file) return;
+  runSelectedFile = file;
+  document.getElementById('runFileLabel').textContent = `📋 ${file.name}`;
+  // 파일명으로 보드 이름 기본값 제안
+  const nameInput = document.getElementById('runName');
+  if (!nameInput.value.trim()) nameInput.value = file.name.replace(/\.(xlsx|xls|csv)$/i, '');
+}
+
+async function createRun() {
+  const name = document.getElementById('runName').value.trim();
+  if (!name) { showToast('보드 이름을 입력해 주세요.', 'error'); return; }
+
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('group', document.getElementById('runGroup').value.trim());
+  fd.append('snapshot', document.getElementById('runSnapshot').value.trim());
+  fd.append('targetVersion', document.getElementById('runTargetVersion').value.trim());
+  fd.append('exchanges', document.getElementById('runExchanges').value.trim());
+
+  // 활성 탭 기준 소스 지정 — 파일 / Google Sheets / TC Manager 스냅샷
+  if (runTab === 'tcman') {
+    const snapId = document.getElementById('runTcmanSelect').value;
+    if (!snapId) { showToast('TC Manager 스냅샷을 선택해 주세요.', 'error'); return; }
+    fd.append('tcmanSnapshotId', snapId);
+  } else if (runTab === 'gsheet') {
+    const gsheetUrl = document.getElementById('runGsheetUrl').value.trim();
+    if (!gsheetUrl) { showToast('Google Sheets URL 을 입력해 주세요.', 'error'); return; }
+    fd.append('gsheetUrl', gsheetUrl);
+  } else {
+    if (!runSelectedFile) { showToast('TC 양식 파일을 선택해 주세요.', 'error'); return; }
+    fd.append('file', runSelectedFile);
+  }
+
+  const btn = document.getElementById('createRunBtn');
+  btn.disabled = true;
+  btn.textContent = '생성 중...';
+  try {
+    const d = await api('/api/runs', { method: 'POST', body: fd });
+    if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '보드 생성 실패'), 'error'); return; }
+    closeModal('newRunModal');
+    showToast(`✅ 보드 생성 완료 — TC ${d.tcCount}건`, 'success');
+    await loadRuns();
+    selectRun(d.id);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '보드 생성';
+  }
 }

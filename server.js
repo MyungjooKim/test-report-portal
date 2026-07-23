@@ -15,6 +15,9 @@ const { computeStatsFromSheetData, collectFailItems } = require('./lib/report-st
 const { computeDetailStats } = require('./lib/detail-stats');
 const pwAdapter = require('./lib/adapters/playwright');
 const manualAdapter = require('./lib/adapters/manual-sheet');
+const tcSheetAdapter = require('./lib/adapters/tc-sheet');
+const tcmanAdapter = require('./lib/adapters/tcman');
+const runBoard = require('./lib/run-board');
 const { elementName } = require('./lib/error-humanize'); // 사유 번역(humanizeError)은 lib/consolidate.js 로 이동
 const XLSX = require('xlsx');
 const { consolidate } = require('./lib/consolidate');
@@ -148,6 +151,7 @@ function loadDB() {
   if (!Array.isArray(db.sources)) db.sources = [];
   if (!Array.isArray(db.records)) db.records = [];
   if (!Array.isArray(db.staging)) db.staging = []; // 취합 미리보기 스테이징 (Phase 2, TTL 24h)
+  if (!Array.isArray(db.runs)) db.runs = []; // 테스트 수행 보드 (test-run R1)
   return db;
 }
 
@@ -1462,6 +1466,328 @@ app.delete('/api/consolidate/staging/:id', (req, res) => {
   db.staging = db.staging.filter(s => s.id !== req.params.id);
   saveDB(db);
   res.json({ success: true });
+});
+
+// ──────────── 테스트 수행 보드 (test-run R1 — docs/01-plan/features/test-run.plan.md) ────────────
+// 결과형 취합(사후 분석)과 다른 "진행 중 작업공간". 모든 기입은 run.events[] append-only 이벤트,
+// 자동/수동/최종 칸·메모 스레드는 투영(lib/run-board.js). R1 = 보드 생성 + 그리드 + 수동 기입 + 메모.
+
+// TC 양식 업로드 전용 — 스프레드시트만 (Playwright ZIP 은 R2 auto-results 로 유입)
+const uploadRunSheet = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (['.xlsx', '.xls', '.csv'].includes(ext)) cb(null, true);
+    else cb(new Error('TC 양식은 XLSX/CSV 파일만 업로드 가능합니다.'));
+  },
+  limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
+});
+
+function sessionEmail(req) {
+  return (req.session.googleUser && req.session.googleUser.email) || '익명';
+}
+
+// ── TC Manager 연동 (B안 — tc-man /api/export 소비, testcase_manager PR #4) ──
+// 키는 서버만 보관(브라우저 미노출) — 화면은 /api/tcman/* 프록시만 호출한다.
+const TCMAN_URL = (process.env.TCMAN_URL || '').replace(/\/$/, '');
+const TCMAN_API_KEY = process.env.TCMAN_API_KEY || '';
+
+function tcmanGetJson(apiPath) {
+  return new Promise((resolve) => {
+    if (!TCMAN_URL || !TCMAN_API_KEY) return resolve(null);
+    let url;
+    try { url = new URL(TCMAN_URL + apiPath); } catch { return resolve(null); }
+    const lib = url.protocol === 'https:' ? require('https') : require('http');
+    const req = lib.request({
+      method: 'GET',
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname,
+      headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${TCMAN_API_KEY}` },
+      timeout: 15000,
+    }, (r) => {
+      let body = '';
+      r.on('data', (c) => { body += c; });
+      r.on('end', () => {
+        if (r.statusCode !== 200) return resolve({ _status: r.statusCode });
+        try { resolve(JSON.parse(body)); } catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+// 스냅샷 목록 — 보드 생성 모달의 TC Manager 탭이 소비
+app.get('/api/tcman/snapshots', async (req, res) => {
+  if (!TCMAN_URL || !TCMAN_API_KEY) {
+    return res.json({ configured: false, snapshots: [] });
+  }
+  const j = await tcmanGetJson('/api/export/snapshots');
+  if (!j || !j.ok) {
+    const why = j && j._status === 401 ? 'API 키가 거부되었습니다' : j && j._status === 503 ? 'TC Manager 쪽 내보내기 API 가 비활성 상태입니다' : 'TC Manager 에 연결하지 못했습니다';
+    return res.status(502).json({ configured: true, error: why });
+  }
+  res.json({ configured: true, exchanges: j.exchanges || [], snapshots: j.snapshots });
+});
+
+function findRun(db, id) {
+  return db.runs.find(r => r.id === id);
+}
+
+// 보드 목록 — 요약 통계 포함 (사이드바·목록 카드용)
+app.get('/api/runs', (req, res) => {
+  const db = loadDB();
+  const list = db.runs.map(run => ({
+    id: run.id, name: run.name, group: run.group || null,
+    snapshot: run.snapshot, targetVersion: run.targetVersion,
+    exchanges: run.exchanges, status: run.status, tcCount: (run.tcs || []).length,
+    createdAt: run.createdAt, updatedAt: run.updatedAt,
+    summary: runBoard.runSummary(run),
+  })).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  res.json(list);
+});
+
+// 보드 생성 — TC 양식 파일(XLSX/CSV) 또는 Google Sheets URL 로 TC 행 파싱
+app.post('/api/runs', uploadRunSheet.single('file'), async (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: '보드 이름을 입력해 주세요.' });
+
+  // 거래소 축 — 쉼표 구분 문자열. 공란이면 축 없는 보드(결과 컬럼 1개)
+  const exchanges = String(req.body.exchanges || '').split(',').map(s => s.trim()).filter(Boolean);
+
+  // TC Manager 스냅샷 경로 (B안) — 서버가 tc-man 에서 직접 fetch, 커버리지·거래소 매핑 원본 유지
+  const tcmanSnapshotId = String(req.body.tcmanSnapshotId || '').trim();
+  let tcmanParsed = null;
+  if (tcmanSnapshotId) {
+    if (!TCMAN_URL || !TCMAN_API_KEY) return res.status(400).json({ error: 'TC Manager 연동이 설정되지 않았습니다 (TCMAN_URL/TCMAN_API_KEY).' });
+    const j = await tcmanGetJson(`/api/export/snapshots/${encodeURIComponent(tcmanSnapshotId)}`);
+    if (!j || !j.ok) {
+      return res.status(502).json({ error: 'TC Manager 스냅샷을 가져오지 못했습니다' + (j && j._status ? ` (HTTP ${j._status})` : '') + '.' });
+    }
+    tcmanParsed = tcmanAdapter.parse(j);
+    if (!tcmanParsed.tcs.length) return res.status(400).json({ error: '스냅샷에 TC 가 없습니다.' });
+  }
+
+  let allData = null;
+  if (tcmanParsed) {
+    // 파일/시트 입력 없음 — 아래 공통 생성 로직으로 진행
+  } else if (req.file) {
+    try {
+      allData = readSpreadsheetFile(path.join(REPORTS_DIR, req.file.filename));
+    } catch (e) {
+      return res.status(400).json({ error: `파일 파싱 실패: ${e.message}` });
+    } finally {
+      try { fs.unlinkSync(path.join(REPORTS_DIR, req.file.filename)); } catch (_) { /* 원본 불필요 */ }
+    }
+  } else if (req.body.gsheetUrl && String(req.body.gsheetUrl).trim()) {
+    const gsheetUrl = String(req.body.gsheetUrl).trim();
+    const oauth2Client = await getGoogleAuthForRequest(req);
+    if (!oauth2Client) return res.status(400).json({ error: 'Google 로그인이 필요합니다.' });
+    const idMatch = gsheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    const spreadsheetId = idMatch ? idMatch[1] : (/^[a-zA-Z0-9-_]+$/.test(gsheetUrl) ? gsheetUrl : null);
+    if (!spreadsheetId) return res.status(400).json({ error: '유효한 Google Spreadsheet URL/ID 가 아닙니다.' });
+    try {
+      const sheetsApi = google.sheets({ version: 'v4', auth: oauth2Client });
+      const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+      allData = {};
+      for (const s of meta.data.sheets) {
+        const sheetName = s.properties.title;
+        try {
+          const r = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: `'${sheetName}'` });
+          allData[sheetName] = r.data.values || [];
+        } catch (_) { allData[sheetName] = []; }
+      }
+    } catch (e) {
+      return res.status(400).json({ error: `Google Sheets 읽기 실패: ${e.message}` });
+    }
+  } else {
+    return res.status(400).json({ error: 'TC 양식 파일, Google Sheets URL 또는 TC Manager 스냅샷을 선택해 주세요.' });
+  }
+
+  let parsed = tcmanParsed;
+  if (!parsed) {
+    if (!tcSheetAdapter.supports(allData)) {
+      return res.status(400).json({ error: 'TC ID 컬럼을 감지하지 못했습니다. TC 양식 시트인지 확인해 주세요.' });
+    }
+    parsed = tcSheetAdapter.parse(allData);
+    if (!parsed.tcs.length) return res.status(400).json({ error: 'TC 행을 찾지 못했습니다.' });
+  }
+
+  const db = loadDB();
+  const now = new Date().toISOString();
+  const run = {
+    id: uuidv4(),
+    name,
+    group: (req.body.group || '').trim() || null,             // 사이드바 그룹 (1단계, 예: "7월말 Epic#19")
+    snapshot: (req.body.snapshot || '').trim() || null,       // 테스트 주기 (불변)
+    targetVersion: (req.body.targetVersion || '').trim() || null, // 현재 대상 빌드 (가변)
+    versionHistory: [],
+    exchanges,
+    status: 'active',
+    uploadToken: uuidv4(), // R2 Playwright 리포터 push 인증용 — 보드에서 복사
+    createdAt: now, createdBy: sessionEmail(req), updatedAt: now,
+    detected: parsed.detected,
+    tcs: parsed.tcs,
+    events: [],
+  };
+  db.runs.push(run);
+  saveDB(db);
+  res.json({ id: run.id, tcCount: run.tcs.length, detected: parsed.detected });
+});
+
+// 보드 상세 — 이벤트 로그를 셀로 투영해 내려준다 (events 원본은 제외)
+app.get('/api/runs/:id', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+  res.json({ ...runBoard.projectRun(run), summary: runBoard.runSummary(run) });
+});
+
+// 보드 수정 — 이름 / 대상 버전(이력 보존) / 상태(active|closed)
+app.patch('/api/runs/:id', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+
+  if (typeof req.body.name === 'string' && req.body.name.trim()) run.name = req.body.name.trim();
+  if (typeof req.body.group === 'string') run.group = req.body.group.trim() || null;
+  if (typeof req.body.targetVersion === 'string') {
+    const v = req.body.targetVersion.trim() || null;
+    if (v !== run.targetVersion) {
+      // 버전 전환 정책(확정): 결과 유지 + stale 배지 — 이력만 보존, 결과는 건드리지 않음
+      run.versionHistory.push({ version: run.targetVersion, until: new Date().toISOString(), by: sessionEmail(req) });
+      run.targetVersion = v;
+    }
+  }
+  if (['active', 'closed'].includes(req.body.status)) run.status = req.body.status;
+  run.updatedAt = new Date().toISOString();
+  saveDB(db);
+  res.json({ success: true, name: run.name, targetVersion: run.targetVersion, status: run.status });
+});
+
+app.delete('/api/runs/:id', (req, res) => {
+  const db = loadDB();
+  if (!findRun(db, req.params.id)) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+  db.runs = db.runs.filter(r => r.id !== req.params.id);
+  saveDB(db);
+  res.json({ success: true });
+});
+
+// 셀 기입 — append-only 이벤트 (수동 결과 / 최종 확정·해제 / 메모)
+// body: { tcId, exchange, kind: 'result'|'note', slot: 'manual'|'final', result, text }
+// by·at·version 은 서버가 스탬프. auto 슬롯은 R2 리포터 전용(토큰 인증)이라 여기서는 거부.
+app.post('/api/runs/:id/events', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+  if (run.status === 'closed') return res.status(400).json({ error: '닫힌 보드에는 기입할 수 없습니다.' });
+
+  const { tcId, kind } = req.body;
+  const exchange = String(req.body.exchange || '');
+  const tc = (run.tcs || []).find(t => t.tcId === tcId);
+  if (!tc) return res.status(400).json({ error: `TC 를 찾을 수 없습니다: ${tcId}` });
+  const validExchanges = runBoard.exchangeKeys(run);
+  if (!validExchanges.includes(exchange)) return res.status(400).json({ error: `보드에 없는 거래소입니다: ${exchange}` });
+
+  const ev = {
+    id: uuidv4(), tcId, exchange, kind,
+    by: sessionEmail(req), at: new Date().toISOString(),
+    version: run.targetVersion || null,
+  };
+
+  if (kind === 'result') {
+    const slot = req.body.slot;
+    if (!['manual', 'final'].includes(slot)) return res.status(400).json({ error: 'slot 은 manual|final 만 가능합니다.' });
+    const result = req.body.result === null || req.body.result === '' ? null : req.body.result;
+    if (result !== null && !runBoard.RESULTS.includes(result)) {
+      return res.status(400).json({ error: `결과값은 ${runBoard.RESULTS.join('/')} 만 가능합니다.` });
+    }
+    if (result === null && slot !== 'final') return res.status(400).json({ error: '결과 해제는 최종 칸만 가능합니다.' });
+    ev.slot = slot;
+    ev.result = result;
+  } else if (kind === 'note') {
+    const text = String(req.body.text || '').trim();
+    if (!text) return res.status(400).json({ error: '메모 내용을 입력해 주세요.' });
+    if (text.length > 4000) return res.status(400).json({ error: '메모가 너무 깁니다. (최대 4000자)' });
+    ev.text = text;
+  } else {
+    return res.status(400).json({ error: 'kind 는 result|note 만 가능합니다.' });
+  }
+
+  run.events.push(ev);
+  run.updatedAt = ev.at;
+  saveDB(db);
+
+  // 변경 셀 투영만 응답 — 화면은 해당 DOM 만 부분 패치 (침입 방지 원칙 1)
+  const cells = runBoard.projectCells(run);
+  const cell = cells.get(`${tcId}|${exchange}`);
+  res.json({ success: true, event: ev, cell, summary: runBoard.runSummary(run) });
+});
+
+// 결과형으로 발행 (R3 — 2026-07-23 시나리오 개정: 보드 1개 = 결과형 프로젝트 1개)
+// 기존 프로젝트를 골라 발행하는 경로는 없다(오발송 사고 방지) — 두 모드만 허용:
+//   mode 'new'       : 새 결과형 프로젝트 생성(이름·폴더 위치만 지정) 후 발행. 발행 연결이 새 프로젝트로 이동
+//   mode 'republish' : 이미 연결된 프로젝트로 재발행(이전 발행분 교체) — 대상 선택 자체가 없음
+app.post('/api/runs/:id/publish', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+
+  const mode = (req.body && req.body.mode) || 'republish';
+  let project;
+  if (mode === 'new') {
+    const name = String((req.body && req.body.name) || '').trim();
+    if (!name) return res.status(400).json({ error: '프로젝트 이름을 입력해 주세요.' });
+    const parentId = (req.body && req.body.parentId) || null;
+    if (parentId) {
+      if (!db.projects.some(p => p.id === parentId)) return res.status(404).json({ error: '폴더 위치를 찾을 수 없습니다.' });
+      if (getProjectDepth(db, parentId) >= 2) return res.status(400).json({ error: '최대 3단계까지만 생성할 수 있습니다.' });
+    }
+    project = {
+      id: uuidv4(), name, parentId, visibility: 'public', type: 'result',
+      ownerId: sessionEmail(req), createdAt: new Date().toISOString(),
+    };
+    db.projects.push(project);
+  } else {
+    if (!run.publishedTo) return res.status(400).json({ error: '아직 발행한 적이 없습니다. 신규 발행으로 프로젝트를 만들어 주세요.' });
+    project = db.projects.find(p => p.id === run.publishedTo.projectId);
+    if (!project) return res.status(404).json({ error: '발행했던 프로젝트가 삭제되었습니다. 신규 발행으로 다시 만들어 주세요.' });
+  }
+
+  const records = runBoard.publishRecords(run);
+  const olds = db.sources.filter(s => s.projectId === project.id && s.runId === run.id);
+  for (const old of olds) db.records = db.records.filter(r => r.sourceId !== old.id);
+  db.sources = db.sources.filter(s => !(s.projectId === project.id && s.runId === run.id));
+
+  const sourceId = uuidv4();
+  db.sources.push({
+    id: sourceId, projectId: project.id, runId: run.id,
+    filename: run.name, format: 'test-run', sourceRole: 'test-run',
+    snapshot: run.snapshot || null, exchange: null, folderId: null, indexPath: null,
+    gsheetUrl: null, stats: null, rowCount: records.length,
+    importedAt: new Date().toISOString(), importedBy: sessionEmail(req),
+    detected: { format: 'test-run', tcCount: (run.tcs || []).length, targetVersion: run.targetVersion || null },
+  });
+  for (const row of records) {
+    db.records.push({ id: uuidv4(), sourceId, projectId: project.id, reportDirRel: null, ...row });
+  }
+
+  run.publishedTo = { projectId: project.id, at: new Date().toISOString(), sourceId };
+  saveDB(db);
+  res.json({ success: true, sourceId, rowCount: records.length, replaced: olds.length > 0, projectId: project.id });
+});
+
+// 셀 메모/이력 스레드 — 해당 셀의 이벤트 전체 (결과 변경 = 시스템 항목, note = 메모)
+app.get('/api/runs/:id/cell-events', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+  const tcId = req.query.tcId;
+  const exchange = String(req.query.exchange || '');
+  const events = (run.events || []).filter(e => e.tcId === tcId && String(e.exchange || '') === exchange);
+  res.json({ events });
 });
 
 // 다이어그램 업로드 — mermaid 코드 붙여넣기 (JSON body, 파일 업로드 없이)
