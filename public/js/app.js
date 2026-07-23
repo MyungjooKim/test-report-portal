@@ -924,7 +924,8 @@ function showUntaggedModal() {
 
 // 제목 셀 — 소스 셀의 titles 중 첫 번째 표시. TC ID 태그([SC-…])는 TC ID 컬럼과 중복이라
 // 표시에서만 제거, 원문(전체 제목 목록)은 툴팁.
-const TC_TAG_RE = /\[\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+\s*\]/g;
+// [SC-A-001] 단일뿐 아니라 [SC-A-001 | SC-A-002] 같은 멀티 ID 묶음(|, /, , 구분)도 제거
+const TC_TAG_RE = /\[\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+(?:\s*[|,/]\s*[A-Z]{2,5}(?:-[A-Z0-9]+)+-\d+)*\s*\]/g;
 function titleCell(r) {
   const all = [];
   for (const s of Object.values(r.sources)) for (const t of (s.titles || [])) if (t && !all.includes(t)) all.push(t);

@@ -1630,7 +1630,7 @@ mark {
 .cons-filter { border: 1px solid var(--border); background: var(--card-bg); color: var(--text); padding: 4px 12px; border-radius: 14px; cursor: pointer; font-size: 13px; }
 .cons-filter.active { background: var(--primary); color: #fff; border-color: var(--primary); }
 .cons-search { flex: 1; min-width: 160px; max-width: 260px; padding: 5px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--text); }
-.cons-table td.tc-title { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.cons-table td.tc-title { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
 .cons-table td.tc-title small { color: var(--text-secondary); opacity: 0.7; }
 .cons-untagged { font-size: 12px; color: var(--warning); margin-left: auto; cursor: pointer; }
 .cons-untagged:hover { text-decoration: underline; }
