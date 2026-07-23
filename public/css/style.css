@@ -1636,6 +1636,9 @@ mark {
 .cons-table th.th-title, .cons-table td.tc-title { max-width: var(--tc-title-w, 240px); width: var(--tc-title-w, 240px); }
 .cons-table td.tc-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
 .cons-table td.tc-title small { color: var(--text-secondary); opacity: 0.7; }
+.cons-table .th-sel, .cons-table .td-sel { width: 28px; text-align: center; }
+.jira-export-box { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; }
+.jira-sel-count { font-size: 12px; color: var(--primary); }
 .cons-untagged { font-size: 12px; color: var(--warning); margin-left: auto; cursor: pointer; }
 .cons-untagged:hover { text-decoration: underline; }
 .untagged-note { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; }
