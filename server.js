@@ -1009,13 +1009,17 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
     const exchange = String((it && it.exchange) || '').trim() || null;
     if (!tcId) continue;
     // 취합 조인 규칙과 동일 — 거래소 없는 레코드는 모든 거래소 행에 조인되므로 함께 허용
-    const rec = db.records.filter(r => r.projectId === project.id && r.tcId === tcId &&
-      r.source === 'automation' && r.result === 'Fail' && r.testId && r.reportDirRel &&
-      (!exchange || !r.exchange || r.exchange === exchange)).pop();
-    if (!rec) { skipped.push({ tcId, exchange, reason: '자동화 Fail 레코드 없음 (매뉴얼 전용 TC 는 추후 확장)' }); continue; }
+    const matches = (r) => r.projectId === project.id && r.tcId === tcId && r.result === 'Fail' &&
+      (!exchange || !r.exchange || r.exchange === exchange);
+    const autoRec = db.records.filter(r => matches(r) && r.source === 'automation' && r.testId && r.reportDirRel).pop();
+    const manualRec = autoRec ? null : db.records.filter(r => matches(r) && r.source !== 'automation').pop();
+    if (!autoRec && !manualRec) { skipped.push({ tcId, exchange, reason: 'Fail 레코드 없음' }); continue; }
     try {
+      const rec = autoRec || manualRec;
       const src = (db.sources || []).find(s => s.id === rec.sourceId);
-      const row = jiraExport.buildRow(rec, { reportsBaseAbs: REPORTS_DIR, publicBase, indexCache, suiteName: src && src.filename });
+      const row = autoRec
+        ? jiraExport.buildRow(autoRec, { reportsBaseAbs: REPORTS_DIR, publicBase, indexCache, suiteName: src && src.filename })
+        : jiraExport.buildManualRow(manualRec, { suiteName: (src && src.filename) || undefined }); // P5 — TC 문서 컬럼 기반
       const key = exchange || rec.exchange || '미지정';
       if (!byExchange.has(key)) byExchange.set(key, []);
       byExchange.get(key).push({ ...row, tcId });
