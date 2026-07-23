@@ -16,6 +16,7 @@ const { computeDetailStats } = require('./lib/detail-stats');
 const pwAdapter = require('./lib/adapters/playwright');
 const manualAdapter = require('./lib/adapters/manual-sheet');
 const tcSheetAdapter = require('./lib/adapters/tc-sheet');
+const tcmanAdapter = require('./lib/adapters/tcman');
 const runBoard = require('./lib/run-board');
 const { elementName } = require('./lib/error-humanize'); // 사유 번역(humanizeError)은 lib/consolidate.js 로 이동
 const XLSX = require('xlsx');
@@ -1486,6 +1487,51 @@ function sessionEmail(req) {
   return (req.session.googleUser && req.session.googleUser.email) || '익명';
 }
 
+// ── TC Manager 연동 (B안 — tc-man /api/export 소비, testcase_manager PR #4) ──
+// 키는 서버만 보관(브라우저 미노출) — 화면은 /api/tcman/* 프록시만 호출한다.
+const TCMAN_URL = (process.env.TCMAN_URL || '').replace(/\/$/, '');
+const TCMAN_API_KEY = process.env.TCMAN_API_KEY || '';
+
+function tcmanGetJson(apiPath) {
+  return new Promise((resolve) => {
+    if (!TCMAN_URL || !TCMAN_API_KEY) return resolve(null);
+    let url;
+    try { url = new URL(TCMAN_URL + apiPath); } catch { return resolve(null); }
+    const lib = url.protocol === 'https:' ? require('https') : require('http');
+    const req = lib.request({
+      method: 'GET',
+      hostname: url.hostname,
+      port: url.port || (url.protocol === 'https:' ? 443 : 80),
+      path: url.pathname,
+      headers: { 'Accept': 'application/json', 'Authorization': `Bearer ${TCMAN_API_KEY}` },
+      timeout: 15000,
+    }, (r) => {
+      let body = '';
+      r.on('data', (c) => { body += c; });
+      r.on('end', () => {
+        if (r.statusCode !== 200) return resolve({ _status: r.statusCode });
+        try { resolve(JSON.parse(body)); } catch { resolve(null); }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.end();
+  });
+}
+
+// 스냅샷 목록 — 보드 생성 모달의 TC Manager 탭이 소비
+app.get('/api/tcman/snapshots', async (req, res) => {
+  if (!TCMAN_URL || !TCMAN_API_KEY) {
+    return res.json({ configured: false, snapshots: [] });
+  }
+  const j = await tcmanGetJson('/api/export/snapshots');
+  if (!j || !j.ok) {
+    const why = j && j._status === 401 ? 'API 키가 거부되었습니다' : j && j._status === 503 ? 'TC Manager 쪽 내보내기 API 가 비활성 상태입니다' : 'TC Manager 에 연결하지 못했습니다';
+    return res.status(502).json({ configured: true, error: why });
+  }
+  res.json({ configured: true, exchanges: j.exchanges || [], snapshots: j.snapshots });
+});
+
 function findRun(db, id) {
   return db.runs.find(r => r.id === id);
 }
@@ -1510,8 +1556,23 @@ app.post('/api/runs', uploadRunSheet.single('file'), async (req, res) => {
   // 거래소 축 — 쉼표 구분 문자열. 공란이면 축 없는 보드(결과 컬럼 1개)
   const exchanges = String(req.body.exchanges || '').split(',').map(s => s.trim()).filter(Boolean);
 
+  // TC Manager 스냅샷 경로 (B안) — 서버가 tc-man 에서 직접 fetch, 커버리지·거래소 매핑 원본 유지
+  const tcmanSnapshotId = String(req.body.tcmanSnapshotId || '').trim();
+  let tcmanParsed = null;
+  if (tcmanSnapshotId) {
+    if (!TCMAN_URL || !TCMAN_API_KEY) return res.status(400).json({ error: 'TC Manager 연동이 설정되지 않았습니다 (TCMAN_URL/TCMAN_API_KEY).' });
+    const j = await tcmanGetJson(`/api/export/snapshots/${encodeURIComponent(tcmanSnapshotId)}`);
+    if (!j || !j.ok) {
+      return res.status(502).json({ error: 'TC Manager 스냅샷을 가져오지 못했습니다' + (j && j._status ? ` (HTTP ${j._status})` : '') + '.' });
+    }
+    tcmanParsed = tcmanAdapter.parse(j);
+    if (!tcmanParsed.tcs.length) return res.status(400).json({ error: '스냅샷에 TC 가 없습니다.' });
+  }
+
   let allData = null;
-  if (req.file) {
+  if (tcmanParsed) {
+    // 파일/시트 입력 없음 — 아래 공통 생성 로직으로 진행
+  } else if (req.file) {
     try {
       allData = readSpreadsheetFile(path.join(REPORTS_DIR, req.file.filename));
     } catch (e) {
@@ -1541,14 +1602,17 @@ app.post('/api/runs', uploadRunSheet.single('file'), async (req, res) => {
       return res.status(400).json({ error: `Google Sheets 읽기 실패: ${e.message}` });
     }
   } else {
-    return res.status(400).json({ error: 'TC 양식 파일 또는 Google Sheets URL 을 입력해 주세요.' });
+    return res.status(400).json({ error: 'TC 양식 파일, Google Sheets URL 또는 TC Manager 스냅샷을 선택해 주세요.' });
   }
 
-  if (!tcSheetAdapter.supports(allData)) {
-    return res.status(400).json({ error: 'TC ID 컬럼을 감지하지 못했습니다. TC 양식 시트인지 확인해 주세요.' });
+  let parsed = tcmanParsed;
+  if (!parsed) {
+    if (!tcSheetAdapter.supports(allData)) {
+      return res.status(400).json({ error: 'TC ID 컬럼을 감지하지 못했습니다. TC 양식 시트인지 확인해 주세요.' });
+    }
+    parsed = tcSheetAdapter.parse(allData);
+    if (!parsed.tcs.length) return res.status(400).json({ error: 'TC 행을 찾지 못했습니다.' });
   }
-  const parsed = tcSheetAdapter.parse(allData);
-  if (!parsed.tcs.length) return res.status(400).json({ error: 'TC 행을 찾지 못했습니다.' });
 
   const db = loadDB();
   const now = new Date().toISOString();

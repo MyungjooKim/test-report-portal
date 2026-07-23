@@ -153,12 +153,15 @@ reporter: [['list'], ['./tr-run-reporter.js', {
 tc-man = TC 원장(마스터). Next.js+Prisma+Postgres, Snapshot/TestCaseExchange/coveragePercent/
 automationStatus/isSmoke/TestProgramMapping 이 보드 개념과 1:1 대응. (github.com/iconloop/testcase_manager)
 
-- **지금(A안)**: tc-man 스냅샷 → Sheets 내보내기 → 보드 생성에 URL 입력 (현행 기능으로 동작).
+- **A안 (현행 유지)**: tc-man 스냅샷 → Sheets 내보내기 → 보드 생성에 URL 입력.
   한계: 스냅샷 export 시트에 Coverage %·자동화 상태 컬럼이 없어 부분 커버리지 자동 파생 불가
-- **본명(B안, 준비)**: 보드 생성 모달에 "TC Manager 스냅샷" 탭 — tr_ui 서버가 tc-man API 호출
-  (`GET /api/snapshots`, `GET /api/snapshots/:id` + TC 목록) → coveragePercent·TestCaseExchange·
-  category1/2/3 원본 그대로 매핑. **선결: tc-man 에 서버 간 read-only 인증(API 키) 추가 협의**
-  (현행 NextAuth 세션 전용, /api/auth/access-token 은 Google Drive Picker 용이라 용도 다름)
+- **B안 구현 완료 (v0.17.0, 2026-07-23)**: 보드 생성 모달 = 소스 탭 3개(파일 기본 / Sheets / TC Manager).
+  TC Manager 탭에서 스냅샷 선택 → 보드 이름·스냅샷(주기)·거래소 축 자동 채움(수정 가능) →
+  서버가 tc-man 에서 TC 전량 fetch (lib/adapters/tcman.js) — coveragePercent·거래소 매핑 원본 유지
+  - tc-man 측: **PR #4** (github.com/iconloop/testcase_manager/pull/4, myungjoo 브랜치) —
+    `GET /api/export/snapshots(/:id)` read-only 2개 + `Bearer EXPORT_API_KEY` (미설정 시 503 비활성)
+  - tr_ui 측: env `TCMAN_URL`/`TCMAN_API_KEY` (키는 서버만 보관), `/api/tcman/snapshots` 프록시
+  - **운영 반영 조건**: PR #4 머지 + tc-man.rgrg.im 에 EXPORT_API_KEY 설정 + tr 운영 env 2개 추가
 - DB 직결(C안)은 스키마 결합 때문에 배제 (로컬 검증용으로만)
 - 역할 정리: tc-man = TC 원장·스냅샷 / tr_ui 보드 = 수행·실시간·이력·대시보드.
   결과 회신(tr_ui → tc-man TestResult write-back)은 추후 결정

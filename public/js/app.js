@@ -3512,15 +3512,74 @@ async function deleteRun() {
   navigateTo('#');
 }
 
-// ── 새 보드 생성 모달 ──
+// ── 새 보드 생성 모달 — 소스 탭 3개: 파일(기본) / Google Sheets / TC Manager 스냅샷 ──
 let runSelectedFile = null;
+let runTab = 'file';
+let tcmanData = null; // { snapshots, exchanges } — 모달 연 동안 캐시
+
+function switchRunTab(tab) {
+  runTab = tab;
+  const order = ['file', 'gsheet', 'tcman'];
+  document.querySelectorAll('#newRunModal .upload-tab').forEach((el, i) => {
+    el.classList.toggle('active', order[i] === tab);
+  });
+  document.getElementById('runTabFile').classList.toggle('active', tab === 'file');
+  document.getElementById('runTabGsheet').classList.toggle('active', tab === 'gsheet');
+  document.getElementById('runTabTcman').classList.toggle('active', tab === 'tcman');
+  if (tab === 'tcman' && !tcmanData) loadTcmanSnapshots();
+}
+
+async function loadTcmanSnapshots() {
+  const sel = document.getElementById('runTcmanSelect');
+  const hint = document.getElementById('runTcmanHint');
+  sel.innerHTML = '<option value="">불러오는 중…</option>';
+  const d = await api('/api/tcman/snapshots');
+  if (!d || d.error || d.configured === false) {
+    sel.innerHTML = '<option value="">— 사용 불가 —</option>';
+    sel.disabled = true;
+    hint.textContent = d && d.error
+      ? `⚠ ${d.error}`
+      : '⚠ TC Manager 연동이 설정되지 않았습니다 — 서버에 TCMAN_URL / TCMAN_API_KEY 를 설정해 주세요.';
+    return;
+  }
+  tcmanData = d;
+  sel.disabled = false;
+  sel.innerHTML = '<option value="" disabled selected hidden>스냅샷 선택…</option>'
+    + d.snapshots.map(s => {
+      const date = String(s.createdAt).slice(0, 10);
+      const label = `${s.version}${s.description ? ' — ' + s.description : ''} · TC ${s.tcCount} · ${date}`;
+      return `<option value="${s.id}">${escapeHtml(label)}</option>`;
+    }).join('');
+  if (!d.snapshots.length) {
+    sel.innerHTML = '<option value="">TC Manager 에 스냅샷이 없습니다</option>';
+    sel.disabled = true;
+  }
+}
+
+// 스냅샷 선택 → 보드 이름·스냅샷(주기)·거래소 축 자동 채움 (비어 있을 때만, 수정 가능)
+document.addEventListener('change', (e) => {
+  if (e.target.id !== 'runTcmanSelect' || !tcmanData) return;
+  const s = tcmanData.snapshots.find(x => x.id === e.target.value);
+  if (!s) return;
+  const nameEl = document.getElementById('runName');
+  if (!nameEl.value.trim()) nameEl.value = s.version + (s.description ? ` (${s.description})` : '');
+  const snapEl = document.getElementById('runSnapshot');
+  if (!snapEl.value.trim()) snapEl.value = s.version;
+  const exEl = document.getElementById('runExchanges');
+  if (!exEl.value.trim() && tcmanData.exchanges && tcmanData.exchanges.length) {
+    exEl.value = tcmanData.exchanges.join(', ');
+  }
+});
 
 function openNewRunModal() {
   runSelectedFile = null;
+  tcmanData = null;
   ['runName', 'runGsheetUrl', 'runSnapshot', 'runTargetVersion', 'runExchanges'].forEach(id => {
     document.getElementById(id).value = '';
   });
-  document.getElementById('runFileLabel').textContent = '📋 TC 양식 파일을 드래그하거나 클릭하여 선택';
+  document.getElementById('runTcmanSelect').innerHTML = '';
+  switchRunTab('file');
+  document.getElementById('runFileLabel').textContent = '📋 TC 양식 파일(XLSX/CSV)을 드래그하거나 클릭하여 선택';
   const zone = document.getElementById('runFileZone');
   if (!zone.dataset.bound) {
     zone.dataset.bound = '1';
@@ -3550,17 +3609,27 @@ function setRunFile(file) {
 
 async function createRun() {
   const name = document.getElementById('runName').value.trim();
-  const gsheetUrl = document.getElementById('runGsheetUrl').value.trim();
   if (!name) { showToast('보드 이름을 입력해 주세요.', 'error'); return; }
-  if (!runSelectedFile && !gsheetUrl) { showToast('TC 양식 파일 또는 Google Sheets URL 을 입력해 주세요.', 'error'); return; }
 
   const fd = new FormData();
   fd.append('name', name);
   fd.append('snapshot', document.getElementById('runSnapshot').value.trim());
   fd.append('targetVersion', document.getElementById('runTargetVersion').value.trim());
   fd.append('exchanges', document.getElementById('runExchanges').value.trim());
-  if (runSelectedFile) fd.append('file', runSelectedFile);
-  else fd.append('gsheetUrl', gsheetUrl);
+
+  // 활성 탭 기준 소스 지정 — 파일 / Google Sheets / TC Manager 스냅샷
+  if (runTab === 'tcman') {
+    const snapId = document.getElementById('runTcmanSelect').value;
+    if (!snapId) { showToast('TC Manager 스냅샷을 선택해 주세요.', 'error'); return; }
+    fd.append('tcmanSnapshotId', snapId);
+  } else if (runTab === 'gsheet') {
+    const gsheetUrl = document.getElementById('runGsheetUrl').value.trim();
+    if (!gsheetUrl) { showToast('Google Sheets URL 을 입력해 주세요.', 'error'); return; }
+    fd.append('gsheetUrl', gsheetUrl);
+  } else {
+    if (!runSelectedFile) { showToast('TC 양식 파일을 선택해 주세요.', 'error'); return; }
+    fd.append('file', runSelectedFile);
+  }
 
   const btn = document.getElementById('createRunBtn');
   btn.disabled = true;

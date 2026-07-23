@@ -298,15 +298,31 @@
           <input type="text" id="runName" class="form-input" placeholder="예: Supercycl 7월 4주차">
         </div>
         <div class="form-group">
-          <label>TC 양식 (XLSX/CSV)</label>
-          <div class="upload-zone upload-zone-sm" id="runFileZone">
-            <div class="upload-zone-content">
-              <p id="runFileLabel">📋 TC 양식 파일을 드래그하거나 클릭하여 선택</p>
-              <span class="upload-hint">TC ID·사전조건·테스트 스텝·기대결과·중요도 컬럼을 자동 감지합니다</span>
-            </div>
-            <input type="file" id="runFileInput" accept=".xlsx,.xls,.csv" hidden>
+          <label>TC 소스</label>
+          <div class="upload-tabs">
+            <button type="button" class="upload-tab active" onclick="switchRunTab('file')">📋 파일</button>
+            <button type="button" class="upload-tab" onclick="switchRunTab('gsheet')">📊 Google Sheets</button>
+            <button type="button" class="upload-tab" onclick="switchRunTab('tcman')">🗂 TC Manager</button>
           </div>
-          <input type="text" id="runGsheetUrl" class="form-input" placeholder="또는 Google Sheets URL / ID" style="margin-top:8px">
+          <div class="upload-tab-content active" id="runTabFile">
+            <div class="upload-zone upload-zone-sm" id="runFileZone">
+              <div class="upload-zone-content">
+                <p id="runFileLabel">📋 TC 양식 파일(XLSX/CSV)을 드래그하거나 클릭하여 선택</p>
+                <span class="upload-hint">TC ID·사전조건·테스트 스텝·기대결과·중요도 컬럼을 자동 감지합니다</span>
+              </div>
+              <input type="file" id="runFileInput" accept=".xlsx,.xls,.csv" hidden>
+            </div>
+          </div>
+          <div class="upload-tab-content" id="runTabGsheet">
+            <input type="text" id="runGsheetUrl" class="form-input" placeholder="Google Sheets URL 또는 ID">
+          </div>
+          <div class="upload-tab-content" id="runTabTcman">
+            <select id="runTcmanSelect" class="form-input"></select>
+            <div class="form-hint" id="runTcmanHint" style="margin-top:6px">
+              스냅샷을 선택하면 보드 이름·스냅샷·거래소 축이 자동으로 채워집니다.
+              자동화 커버리지(Coverage %)·대상 거래소 매핑이 원본 그대로 반영됩니다.
+            </div>
+          </div>
         </div>
         <div class="form-row">
           <div class="form-group">

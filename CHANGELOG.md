@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0] - 2026-07-23
+
+### Added — 보드 생성에 TC Manager 스냅샷 직결 (tc-man 연동 B안)
+- 보드 생성 모달 = 소스 탭 3개: 📋 파일(기본) / 📊 Google Sheets / 🗂 TC Manager
+- TC Manager 탭: 스냅샷 목록(버전·설명·TC 수·생성일)에서 선택 → 보드 이름·스냅샷(주기)·
+  거래소 축 자동 채움(수정 가능) → 서버가 tc-man API 에서 TC 전량 fetch
+- Sheets 경유 대비 이점: **coveragePercent(최종 자동 파생 규칙 입력)와 대상 거래소 매핑이 원본 그대로**
+- lib/adapters/tcman.js — tc-man export 페이로드 → 보드 TC 행 (HIGH→High, 공통=[]=전 거래소 등)
+- env `TCMAN_URL`/`TCMAN_API_KEY` (키는 서버만 보관, 화면은 /api/tcman/snapshots 프록시 소비)
+- tc-man 측 선결 = testcase_manager **PR #4** (read-only /api/export 라우트 + Bearer 키) — 머지 전에는
+  탭에서 연결 안내만 표시
+
 ## [0.16.4] - 2026-07-23
 
 ### Changed
