@@ -635,7 +635,7 @@ function renderConsFilters() {
         `<button class="cons-filter ${consolidatedFilter===k?'active':''}" onclick="setConsFilter('${k}')">${label}</button>`).join('')}
       <input type="text" class="cons-search" id="consSearch" placeholder="TC ID 검색…" value="${escapeAttr(consSearchQ)}" oninput="consSearchQ=this.value; renderConsTable()">
       ${chips.join('')}
-      ${data.untagged.count ? `<span class="cons-untagged" title="TC ID 없는 테스트(setup/teardown/미태그)">미태그 ${data.untagged.count}건</span>` : ''}
+      ${data.untagged.count ? `<span class="cons-untagged" title="TC ID 없는 테스트(setup/teardown/미태그) — 클릭하면 목록" onclick="showUntaggedModal()">미태그 ${data.untagged.count}건</span>` : ''}
     </div>`;
 }
 
@@ -875,6 +875,50 @@ function closeLightbox() {
   document.getElementById('lightbox')?.classList.remove('open');
   document.removeEventListener('keydown', lbKeys);
   lb = null;
+}
+
+// 미태그 목록 모달 — TC ID 태그 없는 테스트(setup/teardown/태그 누락) 열람. N/T(skipped) 우선 정렬.
+function showUntaggedModal() {
+  const u = consolidatedData && consolidatedData.untagged;
+  if (!u || !u.count) return;
+  let overlay = document.getElementById('untaggedModal');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'untaggedModal';
+    overlay.className = 'modal-overlay hidden';
+    document.body.appendChild(overlay);
+  }
+  const ORDER = { 'N/T': 0, 'Fail': 1, 'Blocked': 2, 'Pass': 3, 'N/A': 4 };
+  const items = [...(u.items || [])].sort((a, b) => (ORDER[a.result] ?? 9) - (ORDER[b.result] ?? 9));
+  const byResult = {};
+  items.forEach(it => { byResult[it.result] = (byResult[it.result] || 0) + 1; });
+  const resBadge = v => `<span class="res-badge res-${String(v).replace('/', '')}">${escapeHtml(v)}</span>`;
+  const summary = Object.entries(byResult).map(([res, n]) => `${resBadge(res)} ${n}건`).join(' · ');
+  overlay.innerHTML = `
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h3>미태그 테스트 ${u.count}건</h3>
+        <button class="modal-close" onclick="closeModal('untaggedModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="untagged-note">제목에 [TC ID] 태그가 없어 취합에서 제외된 테스트입니다.
+          ${summary}${u.count > items.length ? ` — 상위 ${items.length}건만 표시` : ''}
+          <br><small>N/T = Playwright skipped 포함. 취합에 넣으려면 테스트 제목에 [SC-…] 태그를 붙여 주세요.</small></p>
+        <table class="cons-table">
+          <thead><tr><th>결과</th><th>제목</th><th>파일(suite)</th><th>환경</th></tr></thead>
+          <tbody>
+            ${items.map(it => `
+              <tr>
+                <td>${resBadge(it.result)}</td>
+                <td>${escapeHtml(it.title || '')}</td>
+                <td>${escapeHtml(it.suite || '')}</td>
+                <td>${escapeHtml(it.env || '')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  openModal('untaggedModal');
 }
 
 // 사유 셀 — 자연어 번역문 우선 표시, 원문은 툴팁. 미지 패턴은 원문 그대로(오역 없음 원칙).
