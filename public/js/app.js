@@ -2948,6 +2948,7 @@ let currentRunId = null;
 let currentRun = null;
 let runStaleOnly = false;
 let runSearchQ = '';
+let runCollapsedSuites = new Set(); // Suite(시트) 섹션 접힘 상태 — 보드 로드 시 초기화
 
 const RUN_RESULTS = ['Pass', 'Fail', 'Blocked', 'N/T', 'N/A'];
 
@@ -3003,6 +3004,10 @@ async function showRunView(id) {
   currentRun = data;
   runStaleOnly = false;
   runSearchQ = '';
+  // 대량 보드(tc-man 스냅샷 등)는 Suite 섹션 기본 접힘 — 헤더 요약으로 조망 후 펼쳐서 작업
+  runCollapsedSuites = new Set();
+  const suiteKeys = new Set((data.tcs || []).map(t => t.sheet || '(기타)'));
+  if ((data.tcs || []).length > 200 && suiteKeys.size > 1) runCollapsedSuites = new Set(suiteKeys);
   renderRunHeader();
   renderRunSummary();
   renderRunToolbar();
@@ -3241,6 +3246,23 @@ function runRowHtml(tci) {
     ${runCellsHtml(tci, tc)}`;
 }
 
+// Suite(시트) 단위 진행 요약 — 섹션 헤더용. 접힌 채로도 현황 파악 가능하게.
+function suiteProgress(idxs) {
+  const exs = exKeysOf(currentRun);
+  const st = { total: 0, filled: 0, fail: 0 };
+  for (const tci of idxs) {
+    const tc = currentRun.tcs[tci];
+    for (const ex of exs) {
+      if (ex && tc.targetExchanges && tc.targetExchanges.length && !tc.targetExchanges.includes(ex)) continue;
+      st.total++;
+      const fin = tc.cells[ex] && tc.cells[ex].final ? tc.cells[ex].final.result : 'N/T';
+      if (fin !== 'N/T') st.filled++;
+      if (fin === 'Fail') st.fail++;
+    }
+  }
+  return st;
+}
+
 function renderRunGrid() {
   const wrap = document.getElementById('runGridWrap');
   const exs = exKeysOf(currentRun);
@@ -3249,21 +3271,51 @@ function renderRunGrid() {
   const exHead1 = exs.map(ex => `<th colspan="3" class="run-ex-head">${escapeHtml(exLabel(ex))}</th>`).join('');
   const exHead2 = exs.map(() => '<th class="run-sub-head">자동 🤖</th><th class="run-sub-head">수동 ✋</th><th class="run-sub-head">최종</th>').join('');
 
-  let body = '';
-  let lastGroup = null;
-  let visible = 0;
+  // 그리드 3단: Suite(시트) 섹션 > 대분류›중분류 그룹 > TC 행 — 시트 1개면 섹션 생략(현행 유지)
+  const suiteOrder = [];
+  const bySuite = new Map();
   (currentRun.tcs || []).forEach((tc, tci) => {
-    if (!runRowVisible(tc)) return;
-    visible++;
-    const group = [tc.category1, tc.category2].filter(Boolean).join(' › ');
-    if (group && group !== lastGroup) {
-      body += `<tr class="run-group"><td colspan="${colCount}">${escapeHtml(group)}</td></tr>`;
-      lastGroup = group;
-    }
-    body += `<tr class="run-row" data-tci="${tci}">${runRowHtml(tci)}</tr>`;
+    const key = tc.sheet || '(기타)';
+    if (!bySuite.has(key)) { bySuite.set(key, []); suiteOrder.push(key); }
+    bySuite.get(key).push(tci);
   });
+  const multiSuite = suiteOrder.length > 1;
 
-  if (!visible) {
+  let body = '';
+  let visible = 0;
+  for (const suite of suiteOrder) {
+    const idxs = bySuite.get(suite);
+    const visibleIdxs = idxs.filter(i => runRowVisible(currentRun.tcs[i]));
+    if (multiSuite && !visibleIdxs.length && (runSearchQ || runStaleOnly)) continue; // 필터로 빈 섹션 숨김
+    visible += visibleIdxs.length;
+
+    const collapsed = multiSuite && runCollapsedSuites.has(suite);
+    if (multiSuite) {
+      const st = suiteProgress(idxs);
+      body += `
+        <tr class="run-suite" data-suite="${escapeHtml(suite)}" title="클릭하여 ${collapsed ? '펼치기' : '접기'}">
+          <td colspan="${colCount}">
+            <span class="run-suite-caret">${collapsed ? '▸' : '▾'}</span>
+            <b>${escapeHtml(suite)}</b>
+            <span class="run-suite-stats">${st.filled}/${st.total}${st.fail ? ` · <i>F${st.fail}</i>` : ''} · TC ${idxs.length}</span>
+          </td>
+        </tr>`;
+      if (collapsed) continue;
+    }
+
+    let lastGroup = null;
+    for (const tci of visibleIdxs) {
+      const tc = currentRun.tcs[tci];
+      const group = [tc.category1, tc.category2].filter(Boolean).join(' › ');
+      if (group && group !== lastGroup) {
+        body += `<tr class="run-group"><td colspan="${colCount}">${escapeHtml(group)}</td></tr>`;
+        lastGroup = group;
+      }
+      body += `<tr class="run-row" data-tci="${tci}">${runRowHtml(tci)}</tr>`;
+    }
+  }
+
+  if (!body) {
     wrap.innerHTML = `<div class="empty-state"><div class="empty-icon">${runStaleOnly ? '✅' : '🔍'}</div><p>${runStaleOnly ? '재검이 필요한 TC 가 없습니다.' : '조건에 맞는 TC 가 없습니다.'}</p></div>`;
     return;
   }
@@ -3337,6 +3389,14 @@ document.addEventListener('click', (e) => {
   if (memoBtn && currentRun) {
     e.stopPropagation();
     openCellMemo(Number(memoBtn.dataset.tci), Number(memoBtn.dataset.exi), memoBtn);
+    return;
+  }
+  const suiteRow = e.target.closest('tr.run-suite');
+  if (suiteRow && currentRun) {
+    const suite = suiteRow.dataset.suite;
+    if (runCollapsedSuites.has(suite)) runCollapsedSuites.delete(suite);
+    else runCollapsedSuites.add(suite);
+    renderRunGrid(); // 사용자 조작에 의한 재렌더 — 침입 아님
     return;
   }
   const tcCell = e.target.closest('td.run-tc');
