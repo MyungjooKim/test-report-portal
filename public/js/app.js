@@ -3664,7 +3664,9 @@ async function loadTcmanSnapshots() {
   sel.innerHTML = '<option value="" disabled selected hidden>스냅샷 선택…</option>'
     + d.snapshots.map(s => {
       const date = String(s.createdAt).slice(0, 10);
-      const label = `${s.version}${s.description ? ' — ' + s.description : ''} · TC ${s.tcCount} · ${date}`;
+      // tc-man 스냅샷은 프로젝트 소속(version 은 프로젝트별 유일) — project 가 오면 라벨에 표기 (PR #5)
+      const proj = s.project ? `[${s.project.code || s.project.name}] ` : '';
+      const label = `${proj}${s.version}${s.description ? ' — ' + s.description : ''} · TC ${s.tcCount} · ${date}`;
       return `<option value="${s.id}">${escapeHtml(label)}</option>`;
     }).join('');
   if (!d.snapshots.length) {
