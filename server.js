@@ -1059,6 +1059,57 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
         data: exchanges.map(ex => ({ range: `'${ex.slice(0, 90)}'!A1`, values: toAoa(byExchange.get(ex)) })),
       },
     });
+
+    // 서식 — 헤더 색/볼드(JIRA·Link 는 수동 입력란 구분색), 컬럼 폭, 셀 줄바꿈, 헤더 행 고정
+    const COL_WIDTHS = [40, 80, 210, 260, 470, 230, 260, 60, 220]; // No~Link (px)
+    const HEADER_BLUE = { red: 0.267, green: 0.447, blue: 0.769 };   // #4472C4
+    const HEADER_PURPLE = { red: 0.482, green: 0.122, blue: 0.635 }; // #7B1FA2 — 테스터 기입란
+    const WHITE_BOLD = { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } };
+    const sheetIdByTitle = new Map((created.data.sheets || []).map(s => [s.properties.title, s.properties.sheetId]));
+    const requests = [];
+    for (const ex of exchanges) {
+      const sheetId = sheetIdByTitle.get(ex.slice(0, 90));
+      if (sheetId == null) continue;
+      const rowCount = byExchange.get(ex).length + 1;
+      COL_WIDTHS.forEach((px, i) => requests.push({
+        updateDimensionProperties: {
+          range: { sheetId, dimension: 'COLUMNS', startIndex: i, endIndex: i + 1 },
+          properties: { pixelSize: px }, fields: 'pixelSize',
+        },
+      }));
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 7 },
+          cell: { userEnteredFormat: { backgroundColor: HEADER_BLUE, textFormat: WHITE_BOLD, horizontalAlignment: 'CENTER' } },
+          fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)',
+        },
+      });
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 7, endColumnIndex: 9 },
+          cell: { userEnteredFormat: { backgroundColor: HEADER_PURPLE, textFormat: WHITE_BOLD, horizontalAlignment: 'CENTER' } },
+          fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)',
+        },
+      });
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex: 1, endRowIndex: rowCount, startColumnIndex: 0, endColumnIndex: 9 },
+          cell: { userEnteredFormat: { wrapStrategy: 'WRAP', verticalAlignment: 'TOP' } },
+          fields: 'userEnteredFormat(wrapStrategy,verticalAlignment)',
+        },
+      });
+      requests.push({
+        updateSheetProperties: {
+          properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+          fields: 'gridProperties.frozenRowCount',
+        },
+      });
+    }
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId: created.data.spreadsheetId,
+      requestBody: { requests },
+    });
+
     res.json({
       url: created.data.spreadsheetUrl,
       counts: Object.fromEntries(exchanges.map(ex => [ex, byExchange.get(ex).length])),
