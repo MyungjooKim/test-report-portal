@@ -95,3 +95,31 @@ test('buildDescription — 4단 틀 + 잔여 액션 없으면 고정 문구', ()
   assert.match(d, /\[Actual Result\]\n5000ms 안에 화면에 나타나지 않았다\./);
   assert.match(d, /\[Expected Result\]\n.*화면에 나타나야 한다\./);
 });
+
+test('buildManualRow — TC 문서 컬럼으로 4단 Description (P5)', () => {
+  const { buildManualRow } = require('../lib/jira-export');
+  const row = buildManualRow({
+    tcId: 'SCM-TRAD-001', title: '레버리지 입력', sheet: 'TC 목록',
+    precondition: '1. 로그인 상태', steps: '1. 레버리지 버튼 클릭\n2. 10x 입력',
+    expected: '레버리지가 10x 로 표시된다', reasonNote: '20x 로 표시됨',
+    envResults: [{ env: '결과', result: 'Fail' }],
+  }, { suiteName: '[SCM] TC 목록' });
+  assert.strictEqual(row.summary, '[SCM-TRAD-001] 레버리지 입력');
+  assert.strictEqual(row.suite, '[SCM] TC 목록');
+  assert.match(row.description, /\[Pre-condition\]\n테스트 화면: \[SCM\] TC 목록\n1\. 로그인 상태/);
+  assert.match(row.description, /\[Steps\]\n1\. 레버리지 버튼 클릭/);
+  assert.match(row.description, /\[Actual Result\]\n20x 로 표시됨/);
+  assert.match(row.description, /\[Expected Result\]\n레버리지가 10x 로 표시된다/);
+});
+
+test('buildManualRow — 사유·스텝 없을 때 폴백', () => {
+  const { buildManualRow } = require('../lib/jira-export');
+  const row = buildManualRow({
+    tcId: 'SCM-TRAD-003', title: null, sheet: 'TC 목록',
+    precondition: null, steps: null, expected: null, reasonNote: null, naReason: null,
+    envResults: [{ env: 'Win', result: 'Fail' }, { env: 'MAC', result: 'Pass' }],
+  });
+  assert.strictEqual(row.summary, '[SCM-TRAD-003]');
+  assert.match(row.description, /\(TC 문서에 스텝 없음\)/);
+  assert.match(row.description, /Win: Fail, MAC: Pass \(매뉴얼 판정\)/);
+});
