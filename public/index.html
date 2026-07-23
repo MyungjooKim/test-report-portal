@@ -295,9 +295,16 @@
         <button class="modal-close" onclick="closeModal('newRunModal')">✕</button>
       </div>
       <div class="modal-body">
-        <div class="form-group">
-          <label>보드 이름</label>
-          <input type="text" id="runName" class="form-input" placeholder="예: Supercycl 7월 4주차">
+        <div class="form-row">
+          <div class="form-group">
+            <label>그룹 (선택)</label>
+            <input type="text" id="runGroup" class="form-input" list="runGroupList" placeholder="예: 7월말 Epic#19">
+            <datalist id="runGroupList"></datalist>
+          </div>
+          <div class="form-group">
+            <label>보드 이름</label>
+            <input type="text" id="runName" class="form-input" placeholder="예: PC 웹 / 모바일">
+          </div>
         </div>
         <div class="form-group">
           <label>TC 소스</label>

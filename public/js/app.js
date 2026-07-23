@@ -2967,6 +2967,29 @@ async function loadRuns() {
   renderRunList();
 }
 
+// 그룹(1단계) 접힘 상태 — 세션 간 유지 (localStorage)
+function runGroupCollapsedSet() {
+  try { return new Set(JSON.parse(localStorage.getItem('runGroupsCollapsed') || '[]')); } catch (_) { return new Set(); }
+}
+function toggleRunGroup(name) {
+  const set = runGroupCollapsedSet();
+  if (set.has(name)) set.delete(name); else set.add(name);
+  localStorage.setItem('runGroupsCollapsed', JSON.stringify([...set]));
+  renderRunList();
+}
+
+function runItemHtml(r, indent) {
+  const s = r.summary || { filled: 0, total: 0, fail: 0 };
+  const closed = r.status === 'closed';
+  return `
+    <li class="run-item ${indent ? 'run-item-child' : ''} ${r.id === currentRunId ? 'active' : ''} ${closed ? 'run-closed' : ''}" onclick="selectRun('${r.id}')">
+      <span class="run-item-icon">${closed ? '🔒' : '🧪'}</span>
+      <span class="tree-name">${escapeHtml(r.name)}</span>
+      ${s.fail ? `<span class="run-fail-dot" title="Fail ${s.fail}건">${s.fail}</span>` : ''}
+      <span class="report-count">${s.filled}/${s.total}</span>
+    </li>`;
+}
+
 function renderRunList() {
   const el = document.getElementById('runList');
   if (!el) return;
@@ -2974,17 +2997,33 @@ function renderRunList() {
     el.innerHTML = '<li class="run-list-empty">아직 보드가 없습니다</li>';
     return;
   }
-  el.innerHTML = runListData.map(r => {
-    const s = r.summary || { filled: 0, total: 0, fail: 0 };
-    const closed = r.status === 'closed';
-    return `
-      <li class="run-item ${r.id === currentRunId ? 'active' : ''} ${closed ? 'run-closed' : ''}" onclick="selectRun('${r.id}')">
-        <span class="run-item-icon">${closed ? '🔒' : '🧪'}</span>
-        <span class="tree-name">${escapeHtml(r.name)}</span>
-        ${s.fail ? `<span class="run-fail-dot" title="Fail ${s.fail}건">${s.fail}</span>` : ''}
-        <span class="report-count">${s.filled}/${s.total}</span>
+  // 그룹(1단계) 구조 — 그룹은 첫 등장 순서, 그룹 없는 보드는 그 자리에 단독 표시
+  const collapsed = runGroupCollapsedSet();
+  const seenGroups = new Set();
+  let html = '';
+  for (const r of runListData) {
+    if (!r.group) { html += runItemHtml(r, false); continue; }
+    if (seenGroups.has(r.group)) continue;
+    seenGroups.add(r.group);
+    const members = runListData.filter(x => x.group === r.group);
+    const agg = members.reduce((a, m) => {
+      const s = m.summary || { filled: 0, total: 0, fail: 0 };
+      a.filled += s.filled; a.total += s.total; a.fail += s.fail;
+      return a;
+    }, { filled: 0, total: 0, fail: 0 });
+    const isCollapsed = collapsed.has(r.group);
+    const hasActive = members.some(m => m.id === currentRunId);
+    html += `
+      <li class="run-group-head ${hasActive ? 'has-active' : ''}" onclick="toggleRunGroup('${escapeAttr(r.group)}')" title="클릭하여 ${isCollapsed ? '펼치기' : '접기'}">
+        <span class="tree-toggle ${isCollapsed ? '' : 'expanded'}">▶</span>
+        <span class="run-item-icon">📁</span>
+        <span class="tree-name">${escapeHtml(r.group)}</span>
+        ${agg.fail ? `<span class="run-fail-dot" title="Fail ${agg.fail}건">${agg.fail}</span>` : ''}
+        <span class="report-count">${agg.filled}/${agg.total}</span>
       </li>`;
-  }).join('');
+    if (!isCollapsed || hasActive) html += members.map(m => runItemHtml(m, true)).join('');
+  }
+  el.innerHTML = html;
 }
 
 function selectRun(id) {
@@ -3023,6 +3062,7 @@ function renderRunHeader() {
   const stale = r.versionHistory && r.versionHistory.length
     ? `<span class="run-chip run-chip-hint" title="이전 버전: ${escapeHtml(r.versionHistory.map(v => v.version || '(미지정)').join(' → '))}">이력 ${r.versionHistory.length}</span>` : '';
   document.getElementById('runMeta').innerHTML = `
+    <span class="run-chip run-chip-version" onclick="changeRunGroup()" title="클릭하여 그룹 변경 — 사이드바에서 같은 그룹끼리 묶입니다">📁 ${escapeHtml(r.group || '그룹 없음')}</span>
     ${r.snapshot ? `<span class="run-chip" title="테스트 주기 (불변)">📅 ${escapeHtml(r.snapshot)}</span>` : ''}
     <span class="run-chip run-chip-version" onclick="changeRunVersion()" title="클릭하여 대상 버전 변경 — 기존 결과는 유지되고 ⚠ 재검 배지가 붙습니다">🏷 ${escapeHtml(r.targetVersion || '버전 미지정')}</span>
     ${stale}
@@ -3068,7 +3108,8 @@ function publishParentOptions() {
 }
 
 function openPublishRunModal() {
-  document.getElementById('publishName').value = currentRun.name;
+  // 대시보드 이름 기본값 — 그룹이 있으면 맥락 포함 (예: "7월말 Epic#19-모바일")
+  document.getElementById('publishName').value = currentRun.group ? `${currentRun.group}-${currentRun.name}` : currentRun.name;
   document.getElementById('publishParentSelect').innerHTML = publishParentOptions();
   openModal('publishRunModal');
   setTimeout(() => document.getElementById('publishName').focus(), 100);
@@ -3536,6 +3577,20 @@ async function renameRun() {
   loadRuns();
 }
 
+async function changeRunGroup() {
+  const g = prompt('그룹 이름 (예: 7월말 Epic#19)\n같은 그룹의 보드끼리 사이드바에서 묶입니다. 비우면 그룹 해제.', currentRun.group || '');
+  if (g === null) return;
+  const d = await api(`/api/runs/${currentRun.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group: g }),
+  });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '수정 실패'), 'error'); return; }
+  currentRun.group = g.trim() || null;
+  renderRunHeader();
+  loadRuns();
+}
+
 async function changeRunVersion() {
   const v = prompt('대상 버전 (현재 테스트 대상 빌드)\n변경해도 기존 결과는 유지되고, 구버전 기록에 ⚠ 재검 배지가 붙습니다.', currentRun.targetVersion || '');
   if (v === null) return;
@@ -3634,9 +3689,12 @@ document.addEventListener('change', (e) => {
 function openNewRunModal() {
   runSelectedFile = null;
   tcmanData = null;
-  ['runName', 'runGsheetUrl', 'runSnapshot', 'runTargetVersion', 'runExchanges'].forEach(id => {
+  ['runName', 'runGroup', 'runGsheetUrl', 'runSnapshot', 'runTargetVersion', 'runExchanges'].forEach(id => {
     document.getElementById(id).value = '';
   });
+  // 기존 그룹 자동완성
+  document.getElementById('runGroupList').innerHTML =
+    [...new Set(runListData.map(r => r.group).filter(Boolean))].map(g => `<option value="${escapeHtml(g)}">`).join('');
   document.getElementById('runTcmanSelect').innerHTML = '';
   switchRunTab('file');
   document.getElementById('runFileLabel').textContent = '📋 TC 양식 파일(XLSX/CSV)을 드래그하거나 클릭하여 선택';
@@ -3673,6 +3731,7 @@ async function createRun() {
 
   const fd = new FormData();
   fd.append('name', name);
+  fd.append('group', document.getElementById('runGroup').value.trim());
   fd.append('snapshot', document.getElementById('runSnapshot').value.trim());
   fd.append('targetVersion', document.getElementById('runTargetVersion').value.trim());
   fd.append('exchanges', document.getElementById('runExchanges').value.trim());

@@ -1540,7 +1540,8 @@ function findRun(db, id) {
 app.get('/api/runs', (req, res) => {
   const db = loadDB();
   const list = db.runs.map(run => ({
-    id: run.id, name: run.name, snapshot: run.snapshot, targetVersion: run.targetVersion,
+    id: run.id, name: run.name, group: run.group || null,
+    snapshot: run.snapshot, targetVersion: run.targetVersion,
     exchanges: run.exchanges, status: run.status, tcCount: (run.tcs || []).length,
     createdAt: run.createdAt, updatedAt: run.updatedAt,
     summary: runBoard.runSummary(run),
@@ -1619,6 +1620,7 @@ app.post('/api/runs', uploadRunSheet.single('file'), async (req, res) => {
   const run = {
     id: uuidv4(),
     name,
+    group: (req.body.group || '').trim() || null,             // 사이드바 그룹 (1단계, 예: "7월말 Epic#19")
     snapshot: (req.body.snapshot || '').trim() || null,       // 테스트 주기 (불변)
     targetVersion: (req.body.targetVersion || '').trim() || null, // 현재 대상 빌드 (가변)
     versionHistory: [],
@@ -1650,6 +1652,7 @@ app.patch('/api/runs/:id', (req, res) => {
   if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
 
   if (typeof req.body.name === 'string' && req.body.name.trim()) run.name = req.body.name.trim();
+  if (typeof req.body.group === 'string') run.group = req.body.group.trim() || null;
   if (typeof req.body.targetVersion === 'string') {
     const v = req.body.targetVersion.trim() || null;
     if (v !== run.targetVersion) {
