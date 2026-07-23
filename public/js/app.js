@@ -731,6 +731,8 @@ function renderConsTable() {
   const capped = rows.slice(0, 1000);
 
   consVisibleFailKeys = capped.filter(r => r.final === 'Fail').map(r => `${r.tcId}|${r.exchange || ''}`);
+  // 헤더 체크박스 상태 반영 — 안 하면 재렌더마다 '해제'로 그려져 토글(전체 해제)이 불가능해진다
+  const allSelected = consVisibleFailKeys.length > 0 && consVisibleFailKeys.every(k => consSelected.has(k));
   const selCell = (r) => {
     if (r.final !== 'Fail') return '<td class="td-sel"></td>';
     const key = `${r.tcId}|${r.exchange || ''}`;
@@ -742,7 +744,7 @@ function renderConsTable() {
     <div class="cons-count">${rows.length ? `${rows.length}행${rows.length > capped.length ? ` (상위 ${capped.length}만 표시)` : ''}` : '조건에 맞는 행이 없습니다 — 상태 필터·사유 칩·검색어 조합을 확인하세요'}</div>
     <table class="cons-table">
       <thead><tr>
-        <th class="th-sel"><input type="checkbox" onclick="toggleConsSelectAll(this.checked)" title="보이는 Fail 전체 선택/해제"></th>
+        <th class="th-sel"><input type="checkbox" ${allSelected ? 'checked' : ''} onclick="toggleConsSelectAll(this.checked)" title="보이는 Fail 전체 선택/해제"></th>
         <th>TC ID</th><th class="th-title">제목<span class="th-resize" onmousedown="startTitleResize(event)" title="드래그로 폭 조절"></span></th>${hasExch ? '<th>거래소</th>' : ''}
         ${sources.map(s => `<th>${escapeHtml(s)}</th>`).join('')}
         <th>최종</th><th>사유</th>
