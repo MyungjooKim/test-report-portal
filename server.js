@@ -1659,15 +1659,35 @@ app.post('/api/runs/:id/events', (req, res) => {
   res.json({ success: true, event: ev, cell, summary: runBoard.runSummary(run) });
 });
 
-// 결과형으로 발행 (R3 — A안 확정) — 보드의 최종 칸을 결과형 프로젝트 소스로 등록.
-// 재발행 = 같은 보드가 이 프로젝트에 발행한 이전 소스를 교체(upsert) — 소스가 늘어나지 않는다.
+// 결과형으로 발행 (R3 — 2026-07-23 시나리오 개정: 보드 1개 = 결과형 프로젝트 1개)
+// 기존 프로젝트를 골라 발행하는 경로는 없다(오발송 사고 방지) — 두 모드만 허용:
+//   mode 'new'       : 새 결과형 프로젝트 생성(이름·폴더 위치만 지정) 후 발행. 발행 연결이 새 프로젝트로 이동
+//   mode 'republish' : 이미 연결된 프로젝트로 재발행(이전 발행분 교체) — 대상 선택 자체가 없음
 app.post('/api/runs/:id/publish', (req, res) => {
   const db = loadDB();
   const run = findRun(db, req.params.id);
   if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
-  const project = db.projects.find(p => p.id === (req.body && req.body.projectId));
-  if (!project) return res.status(404).json({ error: '결과형 프로젝트를 찾을 수 없습니다.' });
-  if (project.type !== 'result') return res.status(400).json({ error: '결과형 프로젝트에만 발행할 수 있습니다.' });
+
+  const mode = (req.body && req.body.mode) || 'republish';
+  let project;
+  if (mode === 'new') {
+    const name = String((req.body && req.body.name) || '').trim();
+    if (!name) return res.status(400).json({ error: '프로젝트 이름을 입력해 주세요.' });
+    const parentId = (req.body && req.body.parentId) || null;
+    if (parentId) {
+      if (!db.projects.some(p => p.id === parentId)) return res.status(404).json({ error: '폴더 위치를 찾을 수 없습니다.' });
+      if (getProjectDepth(db, parentId) >= 2) return res.status(400).json({ error: '최대 3단계까지만 생성할 수 있습니다.' });
+    }
+    project = {
+      id: uuidv4(), name, parentId, visibility: 'public', type: 'result',
+      ownerId: sessionEmail(req), createdAt: new Date().toISOString(),
+    };
+    db.projects.push(project);
+  } else {
+    if (!run.publishedTo) return res.status(400).json({ error: '아직 발행한 적이 없습니다. 신규 발행으로 프로젝트를 만들어 주세요.' });
+    project = db.projects.find(p => p.id === run.publishedTo.projectId);
+    if (!project) return res.status(404).json({ error: '발행했던 프로젝트가 삭제되었습니다. 신규 발행으로 다시 만들어 주세요.' });
+  }
 
   const records = runBoard.publishRecords(run);
   const olds = db.sources.filter(s => s.projectId === project.id && s.runId === run.id);

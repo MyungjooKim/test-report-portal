@@ -3023,8 +3023,14 @@ function renderRunHeader() {
     ${r.status === 'closed' ? '<span class="run-chip run-chip-closed">🔒 닫힘</span>' : ''}
     ${publishedChip(r)}`;
 
+  // 발행 정책(2026-07-23 개정): 미발행 = 신규 프로젝트 생성 발행 / 발행됨 = 연결된 곳으로만 재발행
+  // + 새 프로젝트로 다시 발행 가능. 기존 프로젝트 선택 경로는 없음(오발송 방지).
+  const publishBtns = r.publishedTo
+    ? `<button class="btn btn-primary" onclick="republishRun()">📊 재발행</button>
+       <button class="btn btn-secondary" onclick="openPublishRunModal()" title="새 결과형 프로젝트를 만들어 다시 발행 — 발행 연결이 새 프로젝트로 이동합니다">새 프로젝트로 발행…</button>`
+    : `<button class="btn btn-primary" onclick="openPublishRunModal()">📊 결과형으로 발행</button>`;
   document.getElementById('runActions').innerHTML = `
-    <button class="btn btn-primary" onclick="openPublishRunModal()">📊 ${r.publishedTo ? '결과형으로 재발행' : '결과형으로 발행'}</button>
+    ${publishBtns}
     <button class="btn btn-secondary" onclick="toggleRunStatus()">${r.status === 'closed' ? '보드 다시 열기' : '보드 닫기'}</button>
     <button class="btn btn-danger-outline" onclick="deleteRun()">🗑 삭제</button>`;
 }
@@ -3041,44 +3047,63 @@ function publishedChip(r) {
     : `<span class="run-chip run-chip-hint">${chip}</span>`;
 }
 
-function resultProjects() {
-  return flattenTree(projectTree).filter(p => p.type === 'result');
+// 폴더 위치 옵션 — 최상위 + 깊이 2 미만 노드(새 프로젝트가 3단계를 넘지 않도록)
+function publishParentOptions() {
+  const opts = ['<option value="">(최상위)</option>'];
+  const walk = (nodes, depth, prefix) => {
+    for (const n of nodes || []) {
+      if (depth < 2) opts.push(`<option value="${n.id}">${prefix}${escapeHtml(n.name)}</option>`);
+      if (n.children) walk(n.children, depth + 1, prefix + '· ');
+    }
+  };
+  walk(projectTree, 0, '');
+  return opts.join('');
 }
 
 function openPublishRunModal() {
-  const projects = resultProjects();
-  if (!projects.length) {
-    showToast('결과형 프로젝트가 없습니다. 사이드바에서 결과형 프로젝트를 먼저 만들어 주세요.', 'error');
-    return;
-  }
-  const sel = document.getElementById('publishProjectSelect');
-  const last = currentRun.publishedTo && currentRun.publishedTo.projectId;
-  sel.innerHTML = projects.map(p =>
-    `<option value="${p.id}" ${p.id === last ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
+  document.getElementById('publishName').value = currentRun.name;
+  document.getElementById('publishParentSelect').innerHTML = publishParentOptions();
   openModal('publishRunModal');
+  setTimeout(() => document.getElementById('publishName').focus(), 100);
 }
 
+async function callPublish(body) {
+  const d = await api(`/api/runs/${currentRun.id}/publish`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '발행 실패'), 'error'); return null; }
+  currentRun.publishedTo = { projectId: d.projectId, at: new Date().toISOString(), sourceId: d.sourceId };
+  return d;
+}
+
+// 신규 발행 — 새 결과형 프로젝트 생성 + 발행 (모달)
 async function publishRun() {
-  const projectId = document.getElementById('publishProjectSelect').value;
-  if (!projectId || !currentRun) return;
+  const name = document.getElementById('publishName').value.trim();
+  if (!name) { showToast('프로젝트 이름을 입력해 주세요.', 'error'); return; }
   const btn = document.getElementById('publishRunBtn');
   btn.disabled = true;
   btn.textContent = '발행 중...';
   try {
-    const d = await api(`/api/runs/${currentRun.id}/publish`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectId }),
-    });
-    if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '발행 실패'), 'error'); return; }
+    const d = await callPublish({ mode: 'new', name, parentId: document.getElementById('publishParentSelect').value || null });
+    if (!d) return;
     closeModal('publishRunModal');
-    currentRun.publishedTo = { projectId: d.projectId, at: new Date().toISOString(), sourceId: d.sourceId };
+    await loadProjects(); // 사이드바에 새 결과형 프로젝트 반영
     renderRunHeader();
-    showToast(`✅ ${d.replaced ? '재발행 완료 (이전 발행분 교체)' : '발행 완료'} — ${d.rowCount}행`, 'success');
+    showToast(`✅ 발행 완료 — 새 결과형 프로젝트 "${name}" · ${d.rowCount}행`, 'success');
   } finally {
     btn.disabled = false;
-    btn.textContent = '발행';
+    btn.textContent = '프로젝트 생성 + 발행';
   }
+}
+
+// 재발행 — 연결된 프로젝트로 원클릭 (이전 발행분 교체)
+async function republishRun() {
+  const d = await callPublish({ mode: 'republish' });
+  if (!d) return;
+  renderRunHeader();
+  showToast(`✅ 재발행 완료 — 이전 발행분 교체 · ${d.rowCount}행`, 'success');
 }
 
 function renderRunSummary() {
