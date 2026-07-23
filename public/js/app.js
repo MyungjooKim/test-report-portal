@@ -3026,9 +3026,9 @@ function renderRunHeader() {
   // 발행 정책(2026-07-23 개정): 미발행 = 신규 프로젝트 생성 발행 / 발행됨 = 연결된 곳으로만 재발행
   // + 새 프로젝트로 다시 발행 가능. 기존 프로젝트 선택 경로는 없음(오발송 방지).
   const publishBtns = r.publishedTo
-    ? `<button class="btn btn-primary" onclick="republishRun()">📊 재발행</button>
-       <button class="btn btn-secondary" onclick="openPublishRunModal()" title="새 결과형 프로젝트를 만들어 다시 발행 — 발행 연결이 새 프로젝트로 이동합니다">새 프로젝트로 발행…</button>`
-    : `<button class="btn btn-primary" onclick="openPublishRunModal()">📊 결과형으로 발행</button>`;
+    ? `<button class="btn btn-primary" onclick="republishRun()" title="연결된 결과 대시보드에 현재 보드 상태를 반영합니다 (이전 반영분 교체)">📊 대시보드 갱신</button>
+       <button class="btn btn-secondary" onclick="openPublishRunModal()" title="결과 대시보드를 새로 하나 더 만듭니다 — 갱신 연결이 새 대시보드로 이동합니다">새 대시보드 만들기…</button>`
+    : `<button class="btn btn-primary" onclick="openPublishRunModal()" title="보드의 최종 결과로 취합 대시보드(결과형 프로젝트)를 만듭니다">📊 결과 대시보드 만들기</button>`;
   document.getElementById('runActions').innerHTML = `
     ${publishBtns}
     <button class="btn btn-secondary" onclick="toggleRunStatus()">${r.status === 'closed' ? '보드 다시 열기' : '보드 닫기'}</button>
@@ -3041,9 +3041,9 @@ function publishedChip(r) {
   if (!r.publishedTo) return '';
   const p = findProjectInTree(projectTree, r.publishedTo.projectId);
   const name = p ? p.name : '(삭제된 프로젝트)';
-  const chip = `📊 발행됨 → ${escapeHtml(name)} · ${formatTime(r.publishedTo.at)}`;
+  const chip = `📊 결과 대시보드: ${escapeHtml(name)} · ${formatTime(r.publishedTo.at)} 반영`;
   return p
-    ? `<span class="run-chip run-chip-version" onclick="selectProject('${p.id}')" title="취합 대시보드 열기">${chip}</span>`
+    ? `<span class="run-chip run-chip-version" onclick="selectProject('${p.id}')" title="결과 대시보드 열기">${chip}</span>`
     : `<span class="run-chip run-chip-hint">${chip}</span>`;
 }
 
@@ -3091,10 +3091,10 @@ async function publishRun() {
     closeModal('publishRunModal');
     await loadProjects(); // 사이드바에 새 결과형 프로젝트 반영
     renderRunHeader();
-    showToast(`✅ 발행 완료 — 새 결과형 프로젝트 "${name}" · ${d.rowCount}행`, 'success');
+    showToast(`✅ 결과 대시보드 생성 완료 — "${name}" · ${d.rowCount}행 반영`, 'success');
   } finally {
     btn.disabled = false;
-    btn.textContent = '프로젝트 생성 + 발행';
+    btn.textContent = '대시보드 만들기';
   }
 }
 
@@ -3103,7 +3103,7 @@ async function republishRun() {
   const d = await callPublish({ mode: 'republish' });
   if (!d) return;
   renderRunHeader();
-  showToast(`✅ 재발행 완료 — 이전 발행분 교체 · ${d.rowCount}행`, 'success');
+  showToast(`✅ 결과 대시보드 갱신 완료 — ${d.rowCount}행 반영 (이전 반영분 교체)`, 'success');
 }
 
 function renderRunSummary() {

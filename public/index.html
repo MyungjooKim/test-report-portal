@@ -260,26 +260,27 @@
   <div class="modal-overlay hidden" id="publishRunModal">
     <div class="modal">
       <div class="modal-header">
-        <h3>결과형 프로젝트로 발행</h3>
+        <h3>결과 대시보드 만들기</h3>
         <button class="modal-close" onclick="closeModal('publishRunModal')">✕</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label>새 결과형 프로젝트 이름</label>
+          <label>대시보드 이름</label>
           <input type="text" id="publishName" class="form-input" placeholder="예: 7월말 Epic#19-모바일">
         </div>
         <div class="form-group">
           <label>폴더 위치</label>
           <select id="publishParentSelect" class="form-input"></select>
           <div class="form-hint" style="margin-top:6px">
-            보드의 <b>최종</b> 칸이 새 결과형 프로젝트의 취합 소스(test-run)로 등록됩니다.<br>
-            이후에는 <b>재발행</b> 버튼으로 이 프로젝트에 갱신되며, 다른 프로젝트를 덮어쓰는 경로는 없습니다.
+            보드의 <b>최종</b> 결과로 취합 대시보드(결과형 프로젝트)가 새로 만들어집니다 —
+            통계·Fail 사유·AI 분석·Jira 내보내기를 여기서 사용합니다.<br>
+            이후 보드에서 <b>대시보드 갱신</b>을 누르면 이 대시보드에 최신 결과가 반영됩니다.
           </div>
         </div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeModal('publishRunModal')">취소</button>
-        <button class="btn btn-primary" id="publishRunBtn" onclick="publishRun()">프로젝트 생성 + 발행</button>
+        <button class="btn btn-primary" id="publishRunBtn" onclick="publishRun()">대시보드 만들기</button>
       </div>
     </div>
   </div>
