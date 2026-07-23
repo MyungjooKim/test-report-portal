@@ -149,6 +149,7 @@ function toggleLauncher(e) {
       cur.textContent = '● 사용 중';
       b.appendChild(cur);
     } else {
+      if (appDef.external_auth) b.title = '별도 로그인이 필요합니다';
       b.onclick = () => { window.location.href = appDef.url; };
     }
     wrap.appendChild(b);

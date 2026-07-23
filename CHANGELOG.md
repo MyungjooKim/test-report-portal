@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.16.3] - 2026-07-23
+
+### Changed
+- 9-dot 런처: 별도 인증(external_auth) 활성 앱에 "별도 로그인이 필요합니다" 툴팁
+  — TC Manager 오픈(tcgen v0.20.1, registry soon 해제) 대응. 목록 자체는 tcgen 단일 소스라 코드 변경 불필요
+
 ## [0.16.2] - 2026-07-23
 
 ### Changed
