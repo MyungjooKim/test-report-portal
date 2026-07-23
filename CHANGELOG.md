@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.19.0] - 2026-07-23
+
+### Added — test-run R2: Playwright 리포터 실시간 자동화 기입
+- **tr-run-reporter.js** (단일 파일, 의존성 없음) — playwright.config 한 줄 + 환경변수(TR_BASE/TR_RUN_ID/
+  TR_TOKEN/TR_EXCHANGE/APP_VERSION)로 설치. onTestEnd 마다 3초 배치 push, 실패 버퍼 재시도,
+  종료 시 전송/미태그 요약. 테스트 실행을 방해하지 않는 fire-and-forget
+- **POST /api/runs/:id/auto-results** — 보드 uploadToken 인증(Google 세션 무관, CI/로컬 어디서든).
+  TC ID 태그(단일/멀티/범위)·거래소([Binance] project 명) 파싱은 기존 어댑터 규칙 재사용.
+  재시도 통과(flaky)는 최종 Pass + 시도 이력 스레드 보존, 대상 거래소 외 셀은 기록 제외
+- **보드 "🤖 자동화 연동" 모달** — 리포터 다운로드, 실행 값 복사(env 스니펫), 토큰 재발급
+- **10초 증분 폴링** — 변경 행만 부분 패치 + 조용한 하이라이트, 편집 중 셀 갱신 보류(다음 폴링 재적용),
+  백그라운드 탭 쉼. 침입 방지 4원칙 준수
+- 미태그 자동화 테스트 카운트 칩(최근 제목 툴팁) + 자동 칸/스레드에 에러 첫 줄(detail) 표시
+- 버전 폴백: 리포터 APP_VERSION → 보드 대상 버전 — 다른 버전 유입은 스탬프 유지 + ⚠ 재검 배지
+
 ## [0.18.3] - 2026-07-23
 
 ### Fixed

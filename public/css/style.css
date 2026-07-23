@@ -1948,3 +1948,20 @@ mark {
 .run-item-child { padding-left: 30px; }
 /* 접힌 그룹 안에 현재 보고 있는 보드가 있으면 헤더를 활성색으로 표시 */
 .run-group-head.active { background: var(--sidebar-active); color: #fff; }
+
+/* 자동화 연동 (test-run R2) */
+.auto-link-code {
+  font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.6;
+  background: #1e2330; color: #c8e6a0; border-radius: 8px; padding: 10px 12px;
+  white-space: pre-wrap; word-break: break-all; user-select: all;
+}
+.run-untagged {
+  font-size: 12px; font-weight: 600; color: var(--warning); cursor: help;
+  padding: 2px 10px; border-radius: 12px;
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+.memo-detail {
+  font-family: ui-monospace, monospace; font-size: 11px; color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+  border-radius: 6px; padding: 4px 8px; margin-top: 3px; word-break: break-all;
+}

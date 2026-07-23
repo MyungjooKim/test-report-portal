@@ -131,7 +131,7 @@ reporter: [['list'], ['./tr-run-reporter.js', {
 | 단계 | 내용 | 산출 |
 |---|---|---|
 | R1 | 보드 생성(TC 양식 업로드→파싱) + 그리드 + 수동 드롭다운 + 셀 메모/이력 | ✅ v0.15.0 (2026-07-23) |
-| R2 | Playwright 리포터 + auto-results API + 자동 칸 실시간 반영(폴링) | 실시간 자동화 기입 |
+| R2 | Playwright 리포터 + auto-results API + 자동 칸 실시간 반영(폴링) | ✅ v0.19.0 (2026-07-23) |
 | R3 | 최종 확정 UX 정리, run 종료(닫기), 결과형 프로젝트로 발행(스냅샷) 연계 | 발행·닫기 ✅ v0.16.0 / Jira 는 발행 경유 |
 
 ## 결과형 발행 (R3 — 2026-07-23 사용자 A안 확정 v0.16.0, 시나리오 개정 v0.16.1)
@@ -198,3 +198,16 @@ presence(셀 편집 중 표시)는 초기 범위 제외 — 실제 경합 관찰
   run 이 커지면(수천 TC × 거래소) 파일 분리(data/runs/*.json) 고려
 - 리포터 인증: run별 uploadToken(보드에서 재발급 가능) — Google 세션과 무관해야 CI/로컬 어디서든 동작
 - TC ID 태그 없는 자동화 테스트는 보드에 매칭 불가 — 미태그 리포트(기존 모달)와 동일하게 별도 카운트 노출
+
+## R2 구현 노트 (v0.19.0, 2026-07-23)
+
+- 전달 방식 = 일반형(사용자 확정): 보드별 uploadToken + "🤖 자동화 연동" 모달에서 실행 값 복사(env 주입)
+  — 그룹 고정 토큰 자동 라우팅(A안)은 구조 안정화 후 재검토
+- 리포터: public/tr-run-reporter.js 단일 파일 — onTestEnd 큐 → 3초 배치(50건) push, 실패 버퍼 재시도
+  (상한 1000), onEnd 최종 flush + 요약. 시도(attempt)마다 전송 → flaky 는 마지막 Pass 가 덮고 이력은 스레드에
+- 서버: POST /api/runs/:id/auto-results — requireAuth 우회(토큰 직접 검증), 태그 파싱/거래소 인식은
+  pw 어댑터(parseTcIds/parseFolderName) 재사용, PW_STATUS_MAP(passed→Pass, failed·timedOut→Fail,
+  interrupted·skipped→N/T). 미태그/unknownTc/대상외(exchangeSkipped) 카운트 → run.autoStats
+- 폴링: GET /api/runs/:id/changes?since= — 변경 셀만 투영 응답, 화면은 해당 행만 부분 패치.
+  편집 중(포커스) 행은 보류 후 다음 폴링 재적용, 백그라운드 탭은 쉼, 툴바는 미태그 칩만 갱신(검색 포커스 보호)
+- 자동 이벤트에 detail(에러 첫 줄) — 자동 칸 툴팁·셀 스레드에 표시
