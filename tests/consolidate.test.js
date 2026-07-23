@@ -152,3 +152,24 @@ test('failReasons — expect/TimeoutError 패턴별 그룹, Fail만 집계', () 
   assert.equal(failReasons[1].pattern, 'TimeoutError: browserContext.waitForEvent');
   assert.equal(failReasons[1].count, 1);
 });
+
+test('사유 자연어 번역 — errorDetail 기반 humanReason, 미지 패턴은 null(원문만)', () => {
+  const err = [
+    'Error: expect(locator).toBeVisible() failed',
+    '',
+    "Locator: getByTestId('confirm-btn')",
+    'Timeout: 5000ms',
+    'Call log: element(s) not found',
+  ].join('\n');
+  const { rows } = consolidate([
+    rec({ tcId: 'SC-A-001', result: 'Fail', reasonNote: 'Error: expect(locator).toBeVisible() failed', errorDetail: err }),
+    rec({ tcId: 'SC-A-002', result: 'Fail', reasonNote: '환경 이슈로 실행 불가' }),
+  ]);
+  const byId = Object.fromEntries(rows.map(r => [r.tcId, r]));
+  // 전체 에러 텍스트로 번역 — 요소명·타임아웃까지 문장에 반영
+  assert.match(byId['SC-A-001'].sources.automation.humanReason, /나타나지 않았어요/);
+  assert.match(byId['SC-A-001'].sources.automation.humanReason, /confirm-btn/);
+  // 매뉴얼 자유 텍스트 사유 — 번역 없음, 원문(reason)만
+  assert.equal(byId['SC-A-002'].sources.automation.humanReason, null);
+  assert.equal(byId['SC-A-002'].sources.automation.reason, '환경 이슈로 실행 불가');
+});

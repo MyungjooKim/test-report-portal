@@ -736,7 +736,7 @@ function renderConsTable() {
             ${hasExch ? `<td>${escapeHtml(r.exchange || '')}</td>` : ''}
             ${sources.map(s => `<td>${cellHtml(r.sources[s])}</td>`).join('')}
             <td>${badge(r.final)}${r.mismatch ? ' <span class="mismatch-tag" title="소스 간 결과 불일치">⚠</span>' : ''}</td>
-            <td class="reason">${escapeHtml(firstReason(r) || '')}</td>
+            ${reasonCell(r)}
           </tr>`).join('')}
       </tbody>
     </table>`;
@@ -770,6 +770,10 @@ async function toggleConsDetail(tr) {
   const panel = detailTr.querySelector('.tcd-panel');
   if (!d || d.error || !(d.records || []).length) { panel.textContent = (d && d.error) || '상세 정보가 없습니다.'; return; }
 
+  // 표 행과 중복되는 정보(거래소·단일 레코드의 소스/결과 태그·자연어 사유)는 표시하지 않는다
+  // — 자연어 사유는 표의 사유 컬럼으로 이동(2026-07-23 합의). 소스/결과 태그는 레코드가
+  // 2개 이상(자동화+매뉴얼 병존 등)일 때만 구분용으로 유지.
+  const multi = d.records.length > 1;
   panel.innerHTML = d.records.map(rec => {
     const envChips = (rec.envResults || []).map(e =>
       `<span class="tcd-env">${escapeHtml(e.env)}: <b>${escapeHtml(e.result)}</b></span>`).join('');
@@ -779,21 +783,14 @@ async function toggleConsDetail(tr) {
     return `
       <div class="tcd-item">
         <div class="tcd-head">
-          <span class="src-badge src-${escapeAttr(rec.source)}">${escapeHtml(rec.source)}</span>
-          <span class="res-badge res-${String(rec.result).replace('/', '')}">${escapeHtml(rec.result)}</span>
-          ${rec.exchange ? `<span class="src-exch">${escapeHtml(rec.exchange)}</span>` : ''}
+          ${multi ? `<span class="src-badge src-${escapeAttr(rec.source)}">${escapeHtml(rec.source)}</span>
+          <span class="res-badge res-${String(rec.result).replace('/', '')}">${escapeHtml(rec.result)}</span>` : ''}
           ${rec.env ? `<span class="src-meta">${escapeHtml(rec.env)}</span>` : ''}
           ${rec.flaky ? '<span class="flaky" title="flaky">⚡</span>' : ''}
           ${rec.title ? `<span class="tcd-title" title="${escapeAttr(rec.title)}">${escapeHtml(rec.title)}</span>` : ''}
           ${rec.deepLink ? `<a class="btn btn-sm tcd-deep" href="${escapeAttr(rec.deepLink)}" target="_blank" onclick="event.stopPropagation()">🎬 영상·트레이스 보기 →</a>` : ''}
         </div>
-        ${rec.humanReason ? `
-          <div class="tcd-why">
-            <div class="tcd-why-label">왜 실패했나요</div>
-            <div>${escapeHtml(rec.humanReason)}</div>
-            ${(rec.errorDetail || rec.reason) ? `<details class="tcd-raw"><summary>원본 에러 메시지 보기</summary><pre>${escapeHtml(rec.errorDetail || rec.reason)}</pre></details>` : ''}
-          </div>`
-        : rec.reason ? `<div class="tcd-reason">${escapeHtml(rec.errorDetail || rec.reason)}</div>` : ''}
+        ${(rec.errorDetail || rec.reason) ? `<details class="tcd-raw"><summary>원본 에러 메시지 보기</summary><pre>${escapeHtml(rec.errorDetail || rec.reason)}</pre></details>` : ''}
         ${envChips ? `<div class="tcd-envs">${envChips}</div>` : ''}
         ${imgs ? `<div class="tcd-thumbs">${imgs}</div>` : ''}
       </div>`;
@@ -880,9 +877,16 @@ function closeLightbox() {
   lb = null;
 }
 
-function firstReason(r) {
-  for (const s of Object.values(r.sources)) { if (s.reason) return s.reason; }
-  return null;
+// 사유 셀 — 자연어 번역문 우선 표시, 원문은 툴팁. 미지 패턴은 원문 그대로(오역 없음 원칙).
+function reasonCell(r) {
+  for (const s of Object.values(r.sources)) {
+    if (s.humanReason || s.reason) {
+      const text = s.humanReason || s.reason;
+      const tip = s.humanReason && s.reason ? ` title="${escapeAttr(s.reason)}"` : '';
+      return `<td class="reason"${tip}>${escapeHtml(text)}</td>`;
+    }
+  }
+  return '<td class="reason"></td>';
 }
 
 // ===== 결과 소스 업로드 위저드 (Phase 2 — §11: ①양식 감지 → ②매핑 확인 → ③미리보기 → ④취합) =====
