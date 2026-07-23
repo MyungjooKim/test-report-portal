@@ -994,6 +994,11 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
   const format = (req.body && req.body.format) === 'gsheet' ? 'gsheet' : 'xlsx';
   if (!items.length) return res.status(400).json({ error: '선택된 항목이 없습니다.' });
 
+  // 단계별 타이밍 로그 — 524(100초 초과) 원인 추적용 (Zero Script QA)
+  const jiraT0 = Date.now();
+  const stepLog = (label) => console.log(`[jira-export] ${label} +${Date.now() - jiraT0}ms`);
+  stepLog(`start (${items.length} items, ${format})`);
+
   const publicBase = `${req.protocol}://${req.get('host')}`;
   const indexCache = new Map(); // 리포트 임베드 zip 은 내보내기당 1회만 연다
   const byExchange = new Map();
@@ -1020,6 +1025,7 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
   }
 
   if (!byExchange.size) return res.status(400).json({ error: '내보낼 수 있는 항목이 없습니다.', skipped });
+  stepLog('rows built');
 
   const toAoa = rows => [JIRA_HEADER, ...rows.map((r, i) =>
     [i + 1, r.issueType, r.suite, r.summary, r.description, r.specLoc, r.screenshot, r.jira, r.link])];
@@ -1042,7 +1048,9 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
 
   // Google Spreadsheet 생성 — tcgen 통합 토큰(scope: auth/spreadsheets) 재사용
   const oauth2Client = await getGoogleAuthForRequest(req);
+  stepLog('auth ready');
   if (!oauth2Client) return res.status(401).json({ error: 'Google 로그인이 필요합니다.' });
+  const GAPI_OPTS = { timeout: 30000 }; // 무한 대기 → 524 방지: 호출당 30초 상한, 초과 시 에러 응답
   try {
     const sheetsApi = google.sheets({ version: 'v4', auth: oauth2Client });
     const exchanges = [...byExchange.keys()];
@@ -1051,14 +1059,16 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
         properties: { title },
         sheets: exchanges.map(ex => ({ properties: { title: ex.slice(0, 90) } })),
       },
-    });
+    }, GAPI_OPTS);
+    stepLog('spreadsheet created');
     await sheetsApi.spreadsheets.values.batchUpdate({
       spreadsheetId: created.data.spreadsheetId,
       requestBody: {
         valueInputOption: 'RAW',
         data: exchanges.map(ex => ({ range: `'${ex.slice(0, 90)}'!A1`, values: toAoa(byExchange.get(ex)) })),
       },
-    });
+    }, GAPI_OPTS);
+    stepLog('values written');
 
     // 서식 — 헤더 색/볼드(JIRA·Link 는 수동 입력란 구분색), 컬럼 폭, 셀 줄바꿈, 헤더 행 고정
     const COL_WIDTHS = [40, 80, 210, 260, 470, 230, 260, 60, 220]; // No~Link (px)
@@ -1108,7 +1118,8 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
     await sheetsApi.spreadsheets.batchUpdate({
       spreadsheetId: created.data.spreadsheetId,
       requestBody: { requests },
-    });
+    }, GAPI_OPTS);
+    stepLog('formatted (done)');
 
     res.json({
       url: created.data.spreadsheetUrl,
@@ -1116,6 +1127,7 @@ app.post('/api/projects/:id/jira-export', async (req, res) => {
       skipped,
     });
   } catch (e) {
+    stepLog(`ERROR: ${e.message}`);
     res.status(502).json({ error: `Google Sheets 생성 실패: ${e.message}`, skipped });
   }
 });
