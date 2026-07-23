@@ -11,6 +11,10 @@
   - `lib/chunk-store.js` — 누락 청크 검증, 경로 조작 차단, 미완성 업로드 1시간 TTL 정리 (테스트 5종)
 - UX: 업로드 진행률 오버레이(파일 n/m · %) + 연결 끊김 시 원인 있는 에러 메시지
 
+### Fixed — CSV 한글 헤더 모지바케 (결과 → ê²°ê³¼)
+- `XLSX.readFile` 이 BOM 없는 CSV 를 cp1252 로 읽던 문제 — 인코딩 감지 후 문자열 파싱으로 전환
+- `lib/csv-text.js` — UTF-8 BOM → UTF-8 검증 → CP949(EUC-KR) 순차 감지 (한국 Excel CSV 저장 대응)
+
 
 ### Added — 서비스 선택 허브(service-hub) 연동
 - 9-dot 런처가 tcgen `/apps` registry 를 단일 소스로 소비 (`/api/apps` 프록시, 쿠키 포워딩)

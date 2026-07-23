@@ -1091,8 +1091,13 @@ function buildMatchPreview(db, projectId, newRecords) {
 }
 
 // XLSX/CSV 파일 → allData({시트명: rows[][]})
+// CSV 는 인코딩 감지(UTF-8/BOM/CP949) 후 문자열로 파싱 — XLSX.readFile 의 cp1252 기본값이
+// 한글 헤더를 모지바케로 만드는 문제 회피. XLSX/XLS 는 zip 기반이라 영향 없음.
+const { decodeCsvBuffer } = require('./lib/csv-text');
 function readSpreadsheetFile(filePath) {
-  const wb = XLSX.readFile(filePath, { raw: false });
+  const wb = path.extname(filePath).toLowerCase() === '.csv'
+    ? XLSX.read(decodeCsvBuffer(fs.readFileSync(filePath)), { type: 'string', raw: false })
+    : XLSX.readFile(filePath, { raw: false });
   const allData = {};
   for (const name of wb.SheetNames) {
     allData[name] = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '' });
