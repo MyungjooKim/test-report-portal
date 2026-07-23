@@ -1927,3 +1927,11 @@ mark {
 .run-suite-caret { display: inline-block; width: 14px; color: var(--text-secondary); font-size: 11px; }
 .run-suite-stats { margin-left: 8px; font-size: 12px; color: var(--text-secondary); font-weight: 500; }
 .run-suite-stats i { font-style: normal; color: var(--danger); font-weight: 700; }
+
+/* 사이드바 섹션 부제 — 단계형 구성(A안): 섹션 성격을 한 줄로 (진행 중 / 확정 결과) */
+.nav-section-title { margin-bottom: 2px; }
+.nav-section-sub {
+  font-size: 10px; color: #565d6b; padding: 0 8px; margin-bottom: 8px;
+  letter-spacing: 0.2px;
+}
+.nav-section + .nav-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.07); }
