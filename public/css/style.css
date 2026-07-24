@@ -1370,9 +1370,10 @@ mark {
 }
 /* suite 축 — 경로가 길어 폭을 Fail 사유 패턴(320px)만큼 넓힘. 오른쪽 정렬 유지로
    잘릴 때 앞부분(tests/…)이 사라지고 구분점인 파일명 끝이 남는다.
-   그래도 넘치면 호버 시 title 툴팁으로 전체 표시 (cursor:help 로 힌트). */
+   그래도 넘치면 호버 시 title 툴팁으로 전체 표시. (cursor 는 부모 .cons-click-row 의
+   pointer 를 상속 — 이 행은 클릭 가능한 필터이므로 손가락이 맞다) */
 .detail-row-label.is-wide {
-  width: 320px; cursor: help;
+  width: 320px;
 }
 .detail-stack {
   flex: 1; display: flex; height: 14px; border-radius: 4px; overflow: hidden;
