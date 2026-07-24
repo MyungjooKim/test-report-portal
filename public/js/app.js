@@ -3858,7 +3858,12 @@ async function createRun() {
     const d = await api('/api/runs', { method: 'POST', body: fd });
     if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '보드 생성 실패'), 'error'); return; }
     closeModal('newRunModal');
-    showToast(`✅ 보드 생성 완료 — TC ${d.tcCount}건`, 'success');
+    // 배제된 시트(목차·표지·상세 없음 등)를 요약해 알림 — "왜 안 보이지?" 방지
+    const excluded = ((d.detected && d.detected.sheets) || []).filter(s => !s.adopted);
+    const exMsg = excluded.length
+      ? ` · 제외 ${excluded.length}시트(${excluded.slice(0, 3).map(s => s.name).join(', ')}${excluded.length > 3 ? ' 외' : ''})`
+      : '';
+    showToast(`✅ 보드 생성 완료 — TC ${d.tcCount}건${exMsg}`, 'success');
     await loadRuns();
     selectRun(d.id);
   } finally {
