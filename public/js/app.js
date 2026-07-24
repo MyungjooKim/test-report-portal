@@ -3812,7 +3812,9 @@ function renderTcmanList() {
   const searching = !!q; // 검색 중엔 접기·더보기 무시하고 매칭 전부 노출
 
   const itemHtml = (s, isLatest) => {
-    const date = String(s.createdAt).slice(0, 10);
+    // 정렬 근거가 생성 시각이므로 날짜를 명시. 무효 createdAt 은 방어적으로 표기.
+    const validTime = !Number.isNaN(Date.parse(s.createdAt));
+    const date = validTime ? `🕐 ${String(s.createdAt).slice(0, 10)}` : '날짜 없음';
     const sel = s.id === selId ? ' selected' : '';
     const by = s.createdBy ? ` · ${escapeHtml(s.createdBy)}` : '';
     const desc = s.description ? `<span class="tcman-item-desc">${escapeHtml(s.description)}</span>` : '';
@@ -3858,10 +3860,18 @@ function renderTcmanList() {
   }).join('');
 }
 
-// 최신순 정렬 — createdAt 내림차순 (같으면 version 역순)
+// 최신순 정렬 — createdAt(생성 시각) 내림차순.
+// 정렬 근거를 createdAt 으로 고정한 이유: id 는 UUID(무작위), version 은 사람이 지은
+// 자유 문자열(정렬 규칙 없음 — v10<v2 함정, "EPIC-.../v3.1" 파싱 불가)이라 신뢰 불가.
+// 방어: createdAt 이 없거나 파싱 불가한 스냅샷은 항상 맨 아래로 보낸다(순서 오염 방지).
+function snapshotTime(s) {
+  const t = Date.parse(s && s.createdAt);
+  return Number.isNaN(t) ? -Infinity : t; // 무효 시각은 최하위
+}
 function byRecent(a, b) {
-  const da = String(a.createdAt || ''), db = String(b.createdAt || '');
-  if (da !== db) return db.localeCompare(da);
+  const ta = snapshotTime(a), tb = snapshotTime(b);
+  if (ta !== tb) return tb - ta;                 // 최신 시각이 위
+  // 동시각(또는 둘 다 무효)일 때만 version 역순 보조 — 안정적 tie-break 용도
   return String(b.version || '').localeCompare(String(a.version || ''));
 }
 

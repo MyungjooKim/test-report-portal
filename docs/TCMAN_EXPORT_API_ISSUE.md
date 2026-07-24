@@ -86,3 +86,18 @@ curl -H "Authorization: Bearer <EXPORT_API_KEY>" \
 - `.env`: `TCMAN_URL=https://tc-man.rgrg.im`, `TCMAN_API_KEY=<발급키>` — 설정 완료
 - 프록시 라우트 `/api/tcman/snapshots`, 어댑터 `lib/adapters/tcman.js` — 구현·테스트 통과 (129 tests green)
 - tc-man 이 위 3개 확인 후 export API 가 200 을 반환하면 **추가 코드 변경 없이 즉시 연동**됩니다.
+
+## 향후 논의 후보 (연동 성공 이후, 스냅샷이 쌓이면)
+
+TR 보드 생성 시 스냅샷 목록을 프로젝트별 트리 + createdAt 최신순으로 정렬한다. 아래는 목록이
+길어질 때 tc-man export 응답에 있으면 UX 가 크게 좋아지는 필드들 — 지금 당장은 불필요, 향후 논의.
+
+1. **스냅샷 성격 플래그** (`status`: draft/released, 또는 `isTest`)
+   - 사람이 `v2.0` 정식 배포 뒤 `v0.1-test` 같은 임시 스냅샷을 나중에 만들면, createdAt 최신순에서
+     테스트본이 "최신" 자리를 차지함. 정렬 근거로 version 은 못 씀(사람이 지은 자유 문자열).
+   - 성격 플래그가 있으면 released 만 상단 노출 / 테스트본은 접기 등 분리 가능.
+2. **서버 페이징·검색** (`?project=&limit=&q=`)
+   - 현재 tr_ui 는 전체 스냅샷을 한 번에 받아 클라이언트에서 필터. 전체 수천 개 규모가 되면
+     이 전량 로딩이 느려짐. 그 시점엔 서버 페이징이 필요 — API 계약 변경 사항이라 미리 공유.
+3. **createdAt 형식 보장** — tr_ui 는 `Date.parse` 로 방어(무효 시각은 목록 최하위)하지만,
+   ISO 8601 형식이 일관되게 오는 게 정렬 신뢰의 전제.
