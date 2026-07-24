@@ -958,6 +958,95 @@ mark {
   display: block;
 }
 
+/* ===== TC Manager 스냅샷 선택 — 검색 + 프로젝트 그룹 카드 목록 ===== */
+.tcman-picker { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--card-bg); }
+
+/* 검색 바 */
+.tcman-search {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--primary) 5%, var(--card-bg));
+}
+.tcman-search-icon { font-size: 13px; opacity: 0.6; }
+.tcman-search-input {
+  flex: 1; border: none; background: transparent; outline: none;
+  font-size: 13px; color: var(--text);
+}
+.tcman-search-input::placeholder { color: var(--text-secondary); }
+.tcman-search-input:disabled { cursor: not-allowed; opacity: 0.5; }
+.tcman-count { font-size: 11px; color: var(--text-secondary); font-weight: 600; white-space: nowrap; }
+
+/* 스크롤 목록 — 목록이 길어져도 모달 높이 고정 */
+.tcman-list { max-height: 240px; overflow-y: auto; }
+.tcman-empty { padding: 24px 12px; text-align: center; color: var(--text-secondary); font-size: 13px; }
+.tcman-empty.tcman-error { color: var(--danger); }
+
+/* 프로젝트 그룹 헤더 — sticky + 접이식(클릭 토글) */
+.tcman-group-head {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 7px 12px; font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+  color: var(--primary-hover);
+  background: color-mix(in srgb, var(--primary) 10%, var(--card-bg));
+  border-bottom: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
+  text-transform: uppercase; user-select: none;
+}
+.tcman-group-head:hover { background: color-mix(in srgb, var(--primary) 15%, var(--card-bg)); }
+.tcman-caret { font-size: 10px; width: 10px; opacity: 0.8; }
+.tcman-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tcman-group-n {
+  display: inline-block; margin-left: 4px; padding: 0 6px;
+  font-size: 10px; font-weight: 700; color: var(--text-secondary);
+  background: color-mix(in srgb, var(--primary) 14%, transparent); border-radius: 10px;
+}
+
+/* 스냅샷 카드 */
+.tcman-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border);
+  transition: background 0.12s;
+}
+.tcman-item:last-child { border-bottom: none; }
+.tcman-item:hover { background: color-mix(in srgb, var(--primary) 6%, var(--card-bg)); }
+.tcman-item:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.tcman-item.selected { background: color-mix(in srgb, var(--primary) 12%, var(--card-bg)); }
+
+/* 라디오 표시 */
+.tcman-item-radio {
+  flex: none; width: 16px; height: 16px; margin-top: 2px; border-radius: 50%;
+  border: 2px solid var(--border); background: var(--card-bg); position: relative;
+}
+.tcman-item.selected .tcman-item-radio { border-color: var(--primary); }
+.tcman-item.selected .tcman-item-radio::after {
+  content: ''; position: absolute; inset: 2px; border-radius: 50%; background: var(--primary);
+}
+
+.tcman-item-main { flex: 1; min-width: 0; }
+.tcman-item-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.tcman-item-ver { font-size: 13px; color: var(--text); font-weight: 700; }
+.tcman-item.selected .tcman-item-ver { color: var(--primary-hover); }
+.tcman-item-desc {
+  font-size: 12px; color: var(--text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tcman-item-meta { margin-top: 2px; font-size: 11px; color: var(--text-secondary); }
+
+/* 최신 배지 — 각 프로젝트 맨 위(최신) 버전 표시 */
+.tcman-latest {
+  flex: none; padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
+  color: #fff; background: var(--primary);
+}
+
+/* 이전 버전 더보기 / 접기 */
+.tcman-more {
+  display: block; width: 100%; text-align: left;
+  padding: 7px 12px 7px 38px; border: none; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--primary) 3%, var(--card-bg));
+  color: var(--primary-hover); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.tcman-more:hover { background: color-mix(in srgb, var(--primary) 8%, var(--card-bg)); }
+
 /* ===== Google Sheets ===== */
 .gsheet-connected {
   display: flex;
