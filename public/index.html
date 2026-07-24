@@ -194,6 +194,7 @@
         <!-- 업로드 탭 -->
         <div class="upload-tabs">
           <button class="upload-tab active" onclick="switchUploadTab('file')">📁 파일 업로드</button>
+          <button class="upload-tab" onclick="switchUploadTab('link')">🔗 링크</button>
           <button class="upload-tab" onclick="switchUploadTab('gsheet')">📊 Google Sheets</button>
           <button class="upload-tab" onclick="switchUploadTab('diagram')">📈 다이어그램</button>
         </div>
@@ -209,6 +210,19 @@
             <input type="file" id="fileInput" multiple accept=".html,.zip,.md" hidden>
           </div>
           <div class="upload-file-list" id="uploadFileList"></div>
+        </div>
+
+        <!-- 링크 탭 — 외부 URL(Claude Artifact 등)을 리포트로 등록. 새 탭으로 열림 -->
+        <div class="upload-tab-content" id="uploadTabLink">
+          <div class="form-group">
+            <label>리포트 URL</label>
+            <input type="url" id="linkUrl" class="form-input" placeholder="https://claude.ai/code/artifact/… 또는 임의의 웹 링크">
+          </div>
+          <div class="form-group">
+            <label>제목 <small>(목록·검색에 표시)</small></label>
+            <input type="text" id="linkTitle" class="form-input" placeholder="예: 로그인 플로우 분석 (Claude Artifact)">
+          </div>
+          <span class="upload-hint">🔗 외부 링크는 앱에 임베드되지 않고 <b>새 탭</b>에서 열립니다. 내용은 검색되지 않으니 제목을 명확히 적어 주세요.</span>
         </div>
 
         <!-- Google Sheets 탭 -->

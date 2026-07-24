@@ -1,6 +1,6 @@
 {
   "name": "test-report-portal",
-  "version": "0.19.3",
+  "version": "0.19.4",
   "description": "테스트 결과 리포트 관리 포털",
   "main": "server.js",
   "scripts": {
