@@ -42,22 +42,28 @@ APP_VERSION=v1.2.4 npx playwright test
 - tr.rgrg.im 결과형 프로젝트 → "결과 소스 업로드"로 업로드 (100MB 초과도 청크 업로드로 처리됨)
 - 스크린샷·영상·트레이스 첨부까지 대시보드에서 딥링크로 열람 가능
 
-### 경로 B — 실시간 리포터 (곧 제공 예정, 권장)
+### 경로 B — 실시간 리포터 (✅ 제공됨, 권장)
 
-QA 팀이 단일 파일 리포터(`tr-run-reporter.js`)를 제공하면 `playwright.config.ts` 에 한 줄 추가:
+QA 가 보드의 **"🤖 자동화 연동"** 버튼에서 리포터 파일과 실행 값을 전달합니다.
+
+1. `tr-run-reporter.js` 파일을 프로젝트에 두고 `playwright.config.ts` 에 한 줄:
 
 ```ts
-reporter: [['list'], ['./tr-run-reporter.js', {
-  base: 'https://tr.rgrg.im',
-  runId: '<보드에서 복사>',
-  token: '<보드에서 복사>',      // Google 로그인 불필요 — 보드별 업로드 토큰
-  exchange: 'Binance',
-}]],
+reporter: [['list'], ['./tr-run-reporter.js']],
 ```
 
-- 테스트가 끝날 때마다(onTestEnd) 결과가 수행 보드의 자동 🤖 칸에 실시간 반영
+2. 실행 시 QA 가 전달한 값을 환경변수로 주입 (보드가 바뀌면 값만 교체):
+
+```bash
+TR_BASE=https://tr.rgrg.im TR_RUN_ID=<보드ID> TR_TOKEN=<토큰> \
+TR_EXCHANGE=Binance APP_VERSION=v1.2.4 npx playwright test
+```
+
+- 테스트가 끝날 때마다(onTestEnd) 결과가 수행 보드의 자동 🤖 칸에 실시간 반영 (화면 10초 폴링)
+- `TR_EXCHANGE` 미지정 시 Playwright project 명의 `[Binance] …` 프리픽스로 자동 인식
+- 재시도 통과(flaky)는 최종 Pass 로 반영되고 시도 이력은 셀 스레드에 남음
 - 네트워크 실패 시 버퍼 후 재시도 — 테스트 실행을 방해하지 않는 fire-and-forget
-- CI/로컬 어디서든 동작 (세션 로그인 불필요, 토큰만)
+- CI/로컬 어디서든 동작 (Google 로그인 불필요, 보드별 토큰만). 실행 종료 시 전송/미태그 요약 로그 출력
 
 ## 3. 엔지니어 분들께 확인·요청드릴 것
 
@@ -70,10 +76,10 @@ reporter: [['list'], ['./tr-run-reporter.js', {
 | 5 | 1회 실행 규모·소요 시간 (테스트 수, 재시도 정책) | 서버 수용량·폴링 주기 산정 |
 | 6 | APP_VERSION 주입 가능 여부 (CI 변수 등) | 빌드 버전 스탬프 |
 
-## 4. QA 팀(우리) 쪽 남은 작업 — R2
+## 4. QA 팀(우리) 쪽 작업 — R2 ✅ 완료 (v0.19.0)
 
-- `POST /api/runs/:id/auto-results` API (uploadToken 인증) — 보드 자동 칸 기입
-- `tr-run-reporter.js` 단일 파일 제공 + 보드 화면에서 다운로드·설정 스니펫 복사 UI
-- 화면 10초 폴링(변경 셀만 부분 패치) — 수행 중 실시간 반영
+- `POST /api/runs/:id/auto-results` (uploadToken 인증, 미태그/매칭불가/대상외 카운트)
+- `tr-run-reporter.js` 단일 파일 + 보드 "🤖 자동화 연동" 모달(다운로드·실행 값 복사·토큰 재발급)
+- 화면 10초 증분 폴링 — 변경 행만 부분 패치, 편집 중 셀 갱신 보류
 
-경로 A 는 오늘도 동작하므로, 태깅(①)만 맞춰지면 즉시 취합·Jira 내보내기가 가능합니다.
+경로 A/B 모두 사용 가능합니다 — 태깅(①)만 맞춰지면 바로 연결됩니다.

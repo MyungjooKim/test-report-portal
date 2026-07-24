@@ -293,6 +293,10 @@ async function requireAuth(req, res, next) {
   // 공개 경로는 통과
   if (PUBLIC_PATHS.some(p => req.path.startsWith(p))) return next();
 
+  // 리포터 push (test-run R2) — Google 세션 무관, run별 uploadToken 을 핸들러가 직접 검증
+  // (CI/엔지니어 PC 어디서든 동작해야 하므로 세션 게이트를 우회한다)
+  if (/^\/api\/runs\/[^/]+\/auto-results$/.test(req.path)) return next();
+
   // 로컬 개발 우회 (LOCAL_DEV=1) — Google 로그인 없이 고정 개발 사용자로 통과
   if (LOCAL_DEV) {
     if (!req.session.googleUser) {
@@ -1788,6 +1792,123 @@ app.get('/api/runs/:id/cell-events', (req, res) => {
   const exchange = String(req.query.exchange || '');
   const events = (run.events || []).filter(e => e.tcId === tcId && String(e.exchange || '') === exchange);
   res.json({ events });
+});
+
+// ──────────── test-run R2 — 자동화 결과 실시간 유입 ────────────
+// 커스텀 Playwright 리포터(tr-run-reporter.js)가 onTestEnd 마다 push 한다.
+// 인증 = run별 uploadToken (Google 세션 무관 — requireAuth 에서 이 경로만 우회).
+
+// Playwright result.status → 표준 결과값. 리포터는 시도(attempt)마다 보내므로
+// 재시도 통과(flaky)는 마지막 이벤트가 Pass 로 덮고 이력은 셀 스레드에 남는다.
+const PW_STATUS_MAP = { passed: 'Pass', failed: 'Fail', timedOut: 'Fail', interrupted: 'N/T', skipped: 'N/T' };
+
+// body: { exchange?, version?, results: [{ title, status, error?, durationMs?, project? }] }
+app.post('/api/runs/:id/auto-results', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+
+  const auth = req.headers['authorization'] || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : String(req.headers['x-upload-token'] || '');
+  if (!run.uploadToken || token !== run.uploadToken) {
+    return res.status(401).json({ error: 'uploadToken 이 올바르지 않습니다.' });
+  }
+  if (run.status === 'closed') return res.status(400).json({ error: '닫힌 보드입니다.' });
+
+  const results = Array.isArray(req.body && req.body.results) ? req.body.results : [];
+  if (!results.length) return res.status(400).json({ error: 'results 가 비어 있습니다.' });
+  if (results.length > 500) return res.status(400).json({ error: '한 번에 최대 500건까지 보낼 수 있습니다.' });
+
+  const validExchanges = runBoard.exchangeKeys(run);
+  const tcById = new Map((run.tcs || []).map(t => [t.tcId, t]));
+  // 버전 폴백 (plan §스냅샷·대상 버전): 리포터 APP_VERSION env → 옵션 → run 현재 targetVersion
+  const version = String(req.body.version || '').trim() || run.targetVersion || null;
+  const now = new Date().toISOString();
+
+  const stats = run.autoStats || { matched: 0, untagged: 0, unknownTc: 0, exchangeSkipped: 0, untaggedTitles: [], lastPushAt: null };
+  let matched = 0, untagged = 0, unknownTc = 0, exchangeSkipped = 0;
+
+  for (const item of results) {
+    const title = String(item && item.title || '');
+    const result = PW_STATUS_MAP[item && item.status] || 'N/T';
+    const tcIds = pwAdapter.parseTcIds(title);
+    if (!tcIds.length) {
+      untagged++;
+      if (stats.untaggedTitles.length < 50 && !stats.untaggedTitles.includes(title)) stats.untaggedTitles.push(title);
+      continue;
+    }
+    // 거래소: 항목 → 요청 공통 → Playwright project 명([Binance] …) → 축 없는 보드는 ''
+    let exchange = String(item.exchange || req.body.exchange || '').trim();
+    if (!exchange && item.project) exchange = pwAdapter.parseFolderName(item.project).exchange || '';
+    if (!validExchanges.includes(exchange)) {
+      // 축 없는 보드('')는 위 includes 가 잡는다 — 보드에 없는 거래소만 스킵
+      exchangeSkipped += tcIds.length;
+      continue;
+    }
+    for (const tcId of tcIds) {
+      const tc = tcById.get(tcId);
+      if (!tc) { unknownTc++; continue; }
+      // 대상 거래소 외 셀(비활성)은 기록하지 않음 — 보드 모수·발행과 정합
+      if (exchange && tc.targetExchanges && tc.targetExchanges.length && !tc.targetExchanges.includes(exchange)) {
+        exchangeSkipped++;
+        continue;
+      }
+      run.events.push({
+        id: uuidv4(), tcId, exchange, kind: 'result', slot: 'auto',
+        result, detail: item.error ? String(item.error).slice(0, 300) : null,
+        by: 'reporter', at: now, version,
+      });
+      matched++;
+    }
+  }
+
+  stats.matched += matched;
+  stats.untagged += untagged;
+  stats.unknownTc += unknownTc;
+  stats.exchangeSkipped += exchangeSkipped;
+  stats.lastPushAt = now;
+  run.autoStats = stats;
+  if (matched) run.updatedAt = now;
+  saveDB(db);
+
+  res.json({ success: true, board: run.name, matched, untagged, unknownTc, exchangeSkipped });
+});
+
+// 업로드 토큰 재발급 — 토큰 유출 시 회전 (기존 리포터 설정은 무효화됨)
+app.post('/api/runs/:id/regenerate-token', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+  run.uploadToken = uuidv4();
+  saveDB(db);
+  res.json({ success: true, uploadToken: run.uploadToken });
+});
+
+// 증분 폴링 (10초) — since 이후 변경된 셀만 투영해 내려준다 (화면은 해당 행만 부분 패치)
+app.get('/api/runs/:id/changes', (req, res) => {
+  const db = loadDB();
+  const run = findRun(db, req.params.id);
+  if (!run) return res.status(404).json({ error: '보드를 찾을 수 없습니다.' });
+  const since = String(req.query.since || '');
+  if (since && run.updatedAt <= since) {
+    return res.json({ changed: false, updatedAt: run.updatedAt });
+  }
+  const keys = new Set();
+  for (const ev of run.events || []) {
+    if (!since || ev.at > since) keys.add(`${ev.tcId}|${ev.exchange || ''}`);
+  }
+  const cells = runBoard.projectCells(run);
+  const changes = [...keys].map(key => {
+    const sep = key.lastIndexOf('|');
+    const tcId = key.slice(0, sep), exchange = key.slice(sep + 1);
+    return { tcId, exchange, cell: cells.get(key) || null };
+  }).filter(c => c.cell);
+  res.json({
+    changed: true, updatedAt: run.updatedAt,
+    changes, summary: runBoard.runSummary(run),
+    autoStats: run.autoStats || null,
+    targetVersion: run.targetVersion || null, status: run.status,
+  });
 });
 
 // 다이어그램 업로드 — mermaid 코드 붙여넣기 (JSON body, 파일 업로드 없이)

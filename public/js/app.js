@@ -2690,6 +2690,7 @@ function showView(viewId) {
   ['dashboard', 'projectView', 'reportViewer', 'searchView', 'runView'].forEach(id => {
     document.getElementById(id).classList.toggle('hidden', id !== viewId);
   });
+  if (viewId !== 'runView') stopRunPolling(); // 보드를 떠나면 실시간 폴링 중단 (R2)
   if (viewId !== 'reportViewer') {
     setViewerFrameUrl('');
   }
@@ -3053,6 +3054,7 @@ async function showRunView(id) {
   renderRunSummary();
   renderRunToolbar();
   renderRunGrid();
+  startRunPolling(); // R2 — 자동화 결과 실시간 반영 (10초 증분)
 }
 
 function renderRunHeader() {
@@ -3080,8 +3082,99 @@ function renderRunHeader() {
     : `<button class="btn btn-primary" onclick="openPublishRunModal()" title="보드의 최종 결과로 취합 대시보드(결과형 프로젝트)를 만듭니다">📊 결과 대시보드 만들기</button>`;
   document.getElementById('runActions').innerHTML = `
     ${publishBtns}
+    <button class="btn btn-secondary" onclick="openAutoLinkModal()" title="Playwright 리포터 연동 — 자동화 결과가 자동 🤖 칸에 실시간 기입됩니다">🤖 자동화 연동</button>
     <button class="btn btn-secondary" onclick="toggleRunStatus()">${r.status === 'closed' ? '보드 다시 열기' : '보드 닫기'}</button>
     <button class="btn btn-danger-outline" onclick="deleteRun()">🗑 삭제</button>`;
+}
+
+// ── 자동화 연동 (R2) — 리포터 실행 값 스니펫 + 토큰 재발급 ──
+function autoLinkEnvText() {
+  const r = currentRun;
+  const base = window.location.origin;
+  const ex = (r.exchanges && r.exchanges[0]) || '';
+  return `TR_BASE=${base} \\\n`
+    + `TR_RUN_ID=${r.id} \\\n`
+    + `TR_TOKEN=${r.uploadToken} \\\n`
+    + (ex ? `TR_EXCHANGE=${ex} \\\n` : '')
+    + `APP_VERSION=${r.targetVersion || 'v0.0.0'} \\\n`
+    + `npx playwright test`;
+}
+
+function openAutoLinkModal() {
+  document.getElementById('autoLinkEnv').textContent = autoLinkEnvText();
+  openModal('autoLinkModal');
+}
+
+async function copyAutoLinkEnv() {
+  try {
+    await navigator.clipboard.writeText(autoLinkEnvText());
+    showToast('📋 실행 값이 복사되었습니다 — 엔지니어에게 전달하세요', 'success');
+  } catch (_) {
+    showToast('복사 실패 — 스니펫을 직접 드래그해 복사해 주세요', 'error');
+  }
+}
+
+async function regenerateRunToken() {
+  if (!confirm('업로드 토큰을 재발급할까요?\n기존 토큰으로 설정된 리포터는 더 이상 전송할 수 없게 됩니다.')) return;
+  const d = await api(`/api/runs/${currentRun.id}/regenerate-token`, { method: 'POST' });
+  if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '재발급 실패'), 'error'); return; }
+  currentRun.uploadToken = d.uploadToken;
+  document.getElementById('autoLinkEnv').textContent = autoLinkEnvText();
+  showToast('🔑 토큰 재발급 완료 — 새 실행 값을 전달해 주세요', 'success');
+}
+
+// ── 실시간 폴링 (R2) — 10초 증분, 변경 행만 부분 패치 (침입 방지 원칙) ──
+let runPollTimer = null;
+let runPollSince = null;
+
+function startRunPolling() {
+  stopRunPolling();
+  runPollSince = currentRun ? currentRun.updatedAt : null;
+  runPollTimer = setInterval(pollRunChanges, 10000);
+}
+
+function stopRunPolling() {
+  if (runPollTimer) clearInterval(runPollTimer);
+  runPollTimer = null;
+}
+
+async function pollRunChanges() {
+  if (!currentRun || document.hidden) return; // 백그라운드 탭은 쉼
+  const id = currentRun.id;
+  const d = await api(`/api/runs/${id}/changes?since=${encodeURIComponent(runPollSince || '')}`);
+  if (!currentRun || currentRun.id !== id) return; // 폴링 중 보드 이동
+  if (!d || d.error) return;
+  if (!d.changed) { runPollSince = d.updatedAt || runPollSince; return; }
+
+  let skipped = false;
+  for (const ch of d.changes || []) {
+    const tci = currentRun.tcs.findIndex(t => t.tcId === ch.tcId);
+    if (tci < 0) continue;
+    currentRun.tcs[tci].cells[ch.exchange || ''] = ch.cell;
+    // 편집 중 셀 갱신 보류 — 포커스가 있는 행은 DOM 패치를 미루고 다음 폴링에서 재적용
+    const tr = document.querySelector(`#runGridWrap tr.run-row[data-tci="${tci}"]`);
+    if (tr && tr.contains(document.activeElement)) { skipped = true; continue; }
+    patchRunRow(tci, true); // 조용한 하이라이트
+  }
+  currentRun.summary = d.summary;
+  currentRun.autoStats = d.autoStats || currentRun.autoStats;
+  renderRunSummary();
+  updateUntaggedChip(); // 툴바 전체 재렌더 금지 — 검색 입력 포커스 보호
+  refreshRunListItem();
+  if (!skipped) runPollSince = d.updatedAt; // 보류가 있으면 since 유지 → 다음 폴링이 재전달
+}
+
+// 미태그 자동화 테스트 카운트 — 보드 매칭 불가분 노출 (plan §리스크)
+function untaggedChipHtml() {
+  const s = currentRun && currentRun.autoStats;
+  if (!s || !s.untagged) return '';
+  const titles = (s.untaggedTitles || []).slice(0, 10).join('\n');
+  return `<span class="run-untagged" title="TC ID 태그가 없어 보드에 매칭하지 못한 자동화 테스트\n${escapeAttr(titles)}">🤖 미태그 ${s.untagged}</span>`;
+}
+
+function updateUntaggedChip() {
+  const el = document.getElementById('runUntaggedChip');
+  if (el) el.innerHTML = untaggedChipHtml();
 }
 
 // ── 결과형으로 발행 (R3 — A안) ──
@@ -3181,6 +3274,7 @@ function renderRunToolbar() {
     <label class="run-stale-toggle" title="현재 대상 버전 이전에 기록된 결과만 표시">
       <input type="checkbox" ${runStaleOnly ? 'checked' : ''} onchange="runStaleOnly = this.checked; renderRunGrid();"> ⚠ 재검 필요만
     </label>
+    <span id="runUntaggedChip">${untaggedChipHtml()}</span>
     <span class="run-tc-count">${(currentRun.tcs || []).length} TC</span>`;
 }
 
@@ -3210,7 +3304,8 @@ function runRowVisible(tc) {
 function runResBadge(result, opts = {}) {
   if (!result) return '<span class="run-empty">—</span>';
   const stale = opts.stale ? ` <span class="run-stale" title="이전 버전(${escapeHtml(opts.version || '')}) 기록 — 재검 필요">⚠</span>` : '';
-  const title = opts.version ? ` title="@${escapeHtml(opts.version)}"` : '';
+  const tipText = [opts.tip, opts.version ? `@${opts.version}` : ''].filter(Boolean).join(' · ');
+  const title = tipText ? ` title="${escapeHtml(tipText)}"` : '';
   return `<span class="res-badge res-${String(result).replace('/', '')}"${title}>${escapeHtml(result)}</span>${stale}`;
 }
 
@@ -3265,6 +3360,7 @@ function runCellsHtml(tci, tc) {
     const cell = tc.cells[ex] || { auto: null, manual: null, final: { result: 'N/T', source: 'derived' }, events: 0 };
     const autoHtml = runResBadge(cell.auto && cell.auto.result, {
       stale: isStaleEntry(cell.auto), version: cell.auto && cell.auto.version,
+      tip: cell.auto && cell.auto.detail, // 자동화 에러 첫 줄 (R2)
     });
     const memoCls = cell.events ? 'run-memo has-memo' : 'run-memo';
     return `
@@ -3532,7 +3628,8 @@ async function reloadMemoThread() {
     const what = ev.result
       ? `${slotName[ev.slot] || ev.slot} <b class="res-badge res-${String(ev.result).replace('/', '')}">${escapeHtml(ev.result)}</b> 기입`
       : `${slotName[ev.slot] || ev.slot} 확정 해제 (자동 파생으로 복귀)`;
-    return `<div class="memo-item memo-system"><div class="memo-text">${what}</div>${meta}</div>`;
+    const detail = ev.detail ? `<div class="memo-detail">${escapeHtml(ev.detail)}</div>` : ''; // 자동화 에러 첫 줄 (R2)
+    return `<div class="memo-item memo-system"><div class="memo-text">${what}</div>${detail}${meta}</div>`;
   }).join('');
   el.scrollTop = el.scrollHeight;
 }
@@ -3761,7 +3858,12 @@ async function createRun() {
     const d = await api('/api/runs', { method: 'POST', body: fd });
     if (!d || d.error) { showToast('❌ ' + ((d && d.error) || '보드 생성 실패'), 'error'); return; }
     closeModal('newRunModal');
-    showToast(`✅ 보드 생성 완료 — TC ${d.tcCount}건`, 'success');
+    // 배제된 시트(목차·표지·상세 없음 등)를 요약해 알림 — "왜 안 보이지?" 방지
+    const excluded = ((d.detected && d.detected.sheets) || []).filter(s => !s.adopted);
+    const exMsg = excluded.length
+      ? ` · 제외 ${excluded.length}시트(${excluded.slice(0, 3).map(s => s.name).join(', ')}${excluded.length > 3 ? ' 외' : ''})`
+      : '';
+    showToast(`✅ 보드 생성 완료 — TC ${d.tcCount}건${exMsg}`, 'success');
     await loadRuns();
     selectRun(d.id);
   } finally {
