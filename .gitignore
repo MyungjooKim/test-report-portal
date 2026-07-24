@@ -3,3 +3,4 @@ uploads/
 /data/
 .env
 .DS_Store
+.preview/

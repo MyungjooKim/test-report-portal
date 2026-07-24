@@ -980,6 +980,7 @@ mark {
 .tcman-list { max-height: 240px; overflow-y: auto; }
 .tcman-empty { padding: 24px 12px; text-align: center; color: var(--text-secondary); font-size: 13px; }
 .tcman-empty.tcman-error { color: var(--danger); }
+.tcman-empty-detail { margin-top: 6px; font-size: 11px; color: var(--text-secondary); font-family: ui-monospace, monospace; }
 
 /* 프로젝트 그룹 헤더 — sticky + 접이식(클릭 토글) */
 .tcman-group-head {
@@ -1088,6 +1089,11 @@ mark {
 .type-badge.automation {
   background: #ecfdf5;
   color: #047857;
+}
+
+.type-badge.link {
+  background: color-mix(in srgb, var(--primary) 14%, #fff);
+  color: var(--primary-hover);
 }
 
 .upload-automation {

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.19.4] - 2026-07-24
+
+### Added — 문서형 리포트: 🔗 링크 업로드
+- 리포트 업로드 모달에 **링크 탭** — 외부 URL(Claude Artifact 등)을 파일 없이 리포트로 등록
+- 열람은 **새 탭**(claude.ai 등은 iframe 임베드를 막으므로 임베드 대신 새 탭이 정직). 목록에 🔗 아이콘 + Link 배지
+- http(s) URL 검증, 삭제 시 로컬 파일 unlink 건너뜀(link 타입은 파일 없음), 내용 검색 불가 안내(제목만 인덱싱)
+
+### Fixed — TC Manager 연동 오류 방어 (502/비JSON 응답)
+- 프론트 `api()` — 게이트웨이(Cloudflare 502/504)가 HTML 에러 페이지를 줘도 `res.json()` 크래시 없이
+  에러 객체 반환 (콘솔 `Unexpected token '<'` SyntaxError 제거). 앱 전체 공용 방어
+- 서버 `/api/tcman/snapshots` — upstream 상태별 안내 구분(401 키거부 / 503 키미설정 / 502·504 일시 다운),
+  tc-man 원본 에러 메시지(detail) 보존·표시
+- 진단 기록: tc-man 미들웨어 예외 반영 확인(307→503), 남은 것은 tc-man `EXPORT_API_KEY` 설정뿐
+
 ## [0.19.3] - 2026-07-24
 
 ### Changed — TC Manager 스냅샷 선택 UI: 접이식 트리 + 최신순

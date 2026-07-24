@@ -441,9 +441,10 @@ function rmDir(dirPath) {
 }
 
 function deleteReportFiles(report) {
+  if (report.type === 'link') return; // 외부 URL — 로컬 파일 없음
   if (report.type === 'folder') {
     rmDir(path.join(REPORTS_DIR, report.folderId));
-  } else {
+  } else if (report.fileName) {
     const filePath = path.join(REPORTS_DIR, report.fileName);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
@@ -736,6 +737,32 @@ app.post('/api/projects/:id/reports', upload.array('files', 20), (req, res) => {
   const automation = req.body.automation === '1';
   const newReports = [];
   const notices = [];
+
+  // 링크 리포트 — 외부 URL(Claude Artifact 등)을 파일 없이 등록. 열람은 새 탭.
+  // 내용을 서버가 읽을 수 없으므로 검색 인덱스는 제목만(originalName).
+  const linkUrl = (req.body.linkUrl || '').trim();
+  if (linkUrl) {
+    if (!/^https?:\/\/.+/i.test(linkUrl)) {
+      return res.status(400).json({ error: 'http(s):// 로 시작하는 URL 을 입력해 주세요.' });
+    }
+    const title = (req.body.linkTitle || '').trim() || linkUrl;
+    const report = {
+      id: uuidv4(),
+      projectId: req.params.id,
+      originalName: title,
+      type: 'link',
+      url: linkUrl,
+      date,
+      uploadedBy,
+      uploadedAt: new Date().toISOString(),
+      automation,
+      memo: '',
+      searchIndex: title,
+    };
+    db.reports.push(report);
+    saveDB(db);
+    return res.json({ success: true, reports: [report], notices });
+  }
 
   for (const file of inputFiles) {
     const ext = path.extname(file.originalname).toLowerCase();
@@ -1513,7 +1540,12 @@ function tcmanGetJson(apiPath) {
       let body = '';
       r.on('data', (c) => { body += c; });
       r.on('end', () => {
-        if (r.statusCode !== 200) return resolve({ _status: r.statusCode });
+        if (r.statusCode !== 200) {
+          // tc-man 이 JSON 에러를 줬으면 메시지 보존, HTML(Cloudflare 502 등)이면 상태만
+          let err = null;
+          try { const p = JSON.parse(body); if (p && typeof p.error === 'string') err = p.error; } catch {}
+          return resolve({ _status: r.statusCode, error: err });
+        }
         try { resolve(JSON.parse(body)); } catch { resolve(null); }
       });
     });
@@ -1530,8 +1562,14 @@ app.get('/api/tcman/snapshots', async (req, res) => {
   }
   const j = await tcmanGetJson('/api/export/snapshots');
   if (!j || !j.ok) {
-    const why = j && j._status === 401 ? 'API 키가 거부되었습니다' : j && j._status === 503 ? 'TC Manager 쪽 내보내기 API 가 비활성 상태입니다' : 'TC Manager 에 연결하지 못했습니다';
-    return res.status(502).json({ configured: true, error: why });
+    const st = j && j._status;
+    const why = st === 401 ? 'API 키가 거부되었습니다 (EXPORT_API_KEY 확인 필요)'
+      : st === 503 ? 'TC Manager 내보내기 API 가 비활성 상태입니다 (EXPORT_API_KEY 미설정)'
+      : st === 502 || st === 504 ? 'TC Manager 서버가 일시적으로 응답하지 않습니다 (잠시 후 다시 시도)'
+      : 'TC Manager 에 연결하지 못했습니다';
+    // tc-man 이 준 원본 에러 메시지가 있으면 함께 전달 (503 "EXPORT_API_KEY 미설정" 등)
+    const detail = j && typeof j.error === 'string' ? j.error : null;
+    return res.status(502).json({ configured: true, error: why, detail, upstreamStatus: st || null });
   }
   res.json({ configured: true, exchanges: j.exchanges || [], snapshots: j.snapshots });
 });

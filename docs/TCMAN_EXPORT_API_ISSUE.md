@@ -1,7 +1,25 @@
 # tc-man export API 연동 — 확인 요청 (tr_ui → tc-man 팀)
 
-> 2026-07-23 작성 / 2026-07-24 갱신. testcase_manager PR #4 (`/api/export/*` read-only) 머지 후,
-> tr.rgrg.im 에서 `tc-man.rgrg.im` 의 export API 를 소비하려는데 **로그인 페이지로 리다이렉트**되어 연동 불가.
+> 2026-07-23 작성 / 2026-07-24 갱신.
+
+## ✅ 진행 상황 (2026-07-24 최신) — 미들웨어 뚫림, EXPORT_API_KEY 만 남음
+
+**어제(307 → /login)에서 오늘 크게 진전됨.** 지금 `tc-man.rgrg.im/api/export/snapshots` 를 호출하면:
+
+```
+HTTP 503  {"error":"EXPORT_API_KEY 미설정 — 내보내기 API가 비활성화되어 있습니다."}
+```
+
+- 307 리다이렉트가 사라짐 → **세션 미들웨어 예외가 반영되어 export 핸들러까지 요청이 도달함** ✅
+- 남은 것은 **딱 하나: tc-man 서버에 `EXPORT_API_KEY` 환경변수 설정**. 설정되는 순간 200 + 스냅샷 목록이 오고, tr_ui 는 재배포 없이 자동 연동됨.
+- (참고) 그 사이 순간적으로 브라우저에 **502(Cloudflare Bad gateway)** 가 보였는데, 이는 tc-man 오리진이 잠시 다운됐던 때(배포 중 추정). 지금은 503 으로 안정화. tr_ui 는 이 502/HTML 응답에도 화면이 깨지지 않도록 방어 코드 반영함(v0.19.4).
+
+**→ tc-man 팀 To-Do: `EXPORT_API_KEY` 환경변수만 설정해 주세요.** (아래 상세는 히스토리)
+
+---
+
+> (히스토리) testcase_manager PR #4 (`/api/export/*` read-only) 머지 후,
+> tr.rgrg.im 에서 `tc-man.rgrg.im` 의 export API 를 소비하려는데 **로그인 페이지로 리다이렉트**되어 연동 불가였음.
 
 ## ⭐ 유력 원인 — 서버 이전 시 미들웨어 인증 예외 설정 누락 (2026-07-24 확인)
 

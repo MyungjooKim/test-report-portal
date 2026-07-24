@@ -266,7 +266,13 @@ async function api(url, options = {}) {
       }
     } catch (_) {}
   }
-  return res.json();
+  // JSON 파싱 방어 — 게이트웨이(Cloudflare 502/504 등)가 HTML 에러 페이지를 주면
+  // res.json() 이 SyntaxError 를 던져 호출부가 크래시함. 에러 객체로 안전하게 변환.
+  try {
+    return await res.json();
+  } catch (_) {
+    return { error: res.ok ? '응답을 해석할 수 없습니다.' : `서버 오류 (HTTP ${res.status})`, _status: res.status, _nonJson: true };
+  }
 }
 
 // ===== Projects =====
@@ -1441,24 +1447,32 @@ function renderDateGroups(grouped) {
         </div>
         <div class="report-items">
           ${reports.map(r => {
-            const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : r.type === 'gsheet' ? '📊' : r.type === 'diagram' ? '📈' : '📄';
+            const isLink = r.type === 'link';
+            const typeIcon = r.type === 'folder' ? '📂' : r.type === 'markdown' ? '📝' : r.type === 'gsheet' ? '📊' : r.type === 'diagram' ? '📈' : isLink ? '🔗' : '📄';
             const typeBadge = r.type === 'folder' ? '<span class="type-badge">ZIP</span>'
               : r.type === 'markdown' ? '<span class="type-badge md">MD</span>'
               : r.type === 'gsheet' ? '<span class="type-badge gsheet">Sheets</span>'
-              : r.type === 'diagram' ? '<span class="type-badge diagram">Diagram</span>' : '';
+              : r.type === 'diagram' ? '<span class="type-badge diagram">Diagram</span>'
+              : isLink ? '<span class="type-badge link">Link</span>' : '';
             const autoBadge = r.automation ? '<span class="type-badge automation" title="자동화 테스트 결과">🤖 자동화</span>' : '';
-            // 행(제목) 클릭 = 대시보드 토글, 결과서 열람은 전용 버튼(📄)으로
-            const viewBtn = `<button class="btn-icon-sm" onclick="event.stopPropagation(); viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')" title="결과서 보기">📄</button>`;
-            // 다이어그램/MD 원본 파일은 렌더 페이지로 새 탭 열기
-            const directUrl = (r.type === 'diagram' || r.type === 'markdown') ? `/api/reports/${r.id}/render` : `/uploads/${r.indexPath}`;
+            // 링크는 임베드 불가 → 앱 내 뷰(📄) 없이 새 탭(↗)만. 그 외는 기존대로 결과서 열람 버튼.
+            const viewBtn = isLink ? ''
+              : `<button class="btn-icon-sm" onclick="event.stopPropagation(); viewReport('${r.id}', '${escapeAttr(r.indexPath)}', '${escapeAttr(r.originalName)}')" title="결과서 보기">📄</button>`;
+            const directUrl = isLink ? r.url
+              : (r.type === 'diagram' || r.type === 'markdown') ? `/api/reports/${r.id}/render` : `/uploads/${r.indexPath}`;
             const refreshBtn = r.type === 'gsheet'
               ? `<button class="btn-icon-sm" onclick="event.stopPropagation(); refreshReport('${r.id}')" title="최신 데이터로 새로고침">🔄</button>` : '';
+            // 링크는 대시보드가 없으니 행 클릭 시 새 탭으로 바로 열기
+            const rowClick = isLink
+              ? `openReportDirect('${escapeAttr(r.url)}')`
+              : `toggleDashboard('${r.id}', '${r.type}')`;
+            const rowTitle = isLink ? '클릭하면 새 탭에서 링크가 열립니다' : '클릭하면 대시보드가 펼쳐집니다';
             return `
-            <div class="report-item" onclick="toggleDashboard('${r.id}', '${r.type}')" title="클릭하면 대시보드가 펼쳐집니다">
+            <div class="report-item" onclick="${rowClick}" title="${rowTitle}">
               <span class="ri-icon">${typeIcon}</span>
               <div class="ri-info">
                 <div class="ri-name">${escapeHtml(r.originalName)} ${typeBadge}${autoBadge}</div>
-                <div class="ri-meta">${r.uploadedBy} · ${formatTime(r.uploadedAt)}${r.lastRefreshedAt ? ' · 🔄 ' + formatTime(r.lastRefreshedAt) : ''}</div>
+                <div class="ri-meta">${r.uploadedBy} · ${formatTime(r.uploadedAt)}${isLink ? ' · 🔗 외부 링크' : ''}${r.lastRefreshedAt ? ' · 🔄 ' + formatTime(r.lastRefreshedAt) : ''}</div>
               </div>
               <div class="ri-actions">
                 ${viewBtn}
@@ -1467,7 +1481,7 @@ function renderDateGroups(grouped) {
                 <button class="btn-icon-sm danger" onclick="event.stopPropagation(); deleteReport('${r.id}')" title="삭제">🗑</button>
               </div>
             </div>
-            <div class="report-dashboard hidden" id="dashboard-${r.id}"></div>
+            ${isLink ? '' : `<div class="report-dashboard hidden" id="dashboard-${r.id}"></div>`}
           `}).join('')}
         </div>
       </div>
@@ -2507,6 +2521,8 @@ function openUploadModal() {
   document.getElementById('uploadDate').value = new Date().toISOString().slice(0, 10);
   document.getElementById('diagramCode').value = '';
   document.getElementById('diagramName').value = '';
+  document.getElementById('linkUrl').value = '';
+  document.getElementById('linkTitle').value = '';
   document.getElementById('uploadAutomation').checked = false;
   switchUploadTab('file');
   openModal('uploadModal');
@@ -2516,17 +2532,23 @@ let currentUploadTab = 'file';
 
 function switchUploadTab(tab) {
   currentUploadTab = tab;
-  const tabOrder = ['file', 'gsheet', 'diagram'];
-  document.querySelectorAll('.upload-tab').forEach((el, i) => {
-    el.classList.toggle('active', tabOrder[i] === tab);
+  const tabs = ['file', 'link', 'gsheet', 'diagram'];
+  // 탭 버튼 활성화 (버튼 순서와 tabs 배열 순서 일치)
+  document.querySelectorAll('.upload-tabs .upload-tab').forEach((el, i) => {
+    el.classList.toggle('active', tabs[i] === tab);
   });
   document.getElementById('uploadTabFile').classList.toggle('active', tab === 'file');
+  document.getElementById('uploadTabLink').classList.toggle('active', tab === 'link');
   document.getElementById('uploadTabGsheet').classList.toggle('active', tab === 'gsheet');
   document.getElementById('uploadTabDiagram').classList.toggle('active', tab === 'diagram');
 
   // 버튼 텍스트/활성화 변경
   const btn = document.getElementById('uploadBtn');
-  if (tab === 'gsheet') {
+  if (tab === 'link') {
+    btn.textContent = '등록';
+    btn.onclick = uploadLink;
+    btn.disabled = !document.getElementById('linkUrl').value.trim();
+  } else if (tab === 'gsheet') {
     btn.textContent = '가져오기';
     btn.onclick = importGoogleSheet;
     const url = document.getElementById('gsheetUrl').value.trim();
@@ -2657,7 +2679,7 @@ async function importGoogleSheet() {
   }
 }
 
-// gsheet URL / 다이어그램 코드 입력 시 버튼 활성화
+// gsheet URL / 다이어그램 코드 / 링크 URL 입력 시 버튼 활성화
 document.addEventListener('input', (e) => {
   if (e.target.id === 'gsheetUrl' && currentUploadTab === 'gsheet') {
     document.getElementById('uploadBtn').disabled = !e.target.value.trim();
@@ -2665,7 +2687,44 @@ document.addEventListener('input', (e) => {
   if (e.target.id === 'diagramCode' && currentUploadTab === 'diagram') {
     document.getElementById('uploadBtn').disabled = !e.target.value.trim();
   }
+  if (e.target.id === 'linkUrl' && currentUploadTab === 'link') {
+    document.getElementById('uploadBtn').disabled = !e.target.value.trim();
+  }
 });
+
+// 링크 리포트 등록 — 외부 URL(Claude Artifact 등)을 파일 없이 리포트로 저장
+async function uploadLink() {
+  if (!currentProjectId) return;
+  const url = document.getElementById('linkUrl').value.trim();
+  const title = document.getElementById('linkTitle').value.trim();
+  if (!url) { showToast('URL 을 입력해 주세요.', 'error'); return; }
+  if (!/^https?:\/\/.+/i.test(url)) { showToast('http(s):// 로 시작하는 URL 을 입력해 주세요.', 'error'); return; }
+
+  const uploaderName = document.getElementById('uploaderName').value.trim() || '익명';
+  localStorage.setItem('uploaderName', uploaderName);
+
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true; btn.textContent = '등록 중...';
+  try {
+    const formData = new FormData();
+    formData.append('linkUrl', url);
+    formData.append('linkTitle', title);
+    formData.append('date', document.getElementById('uploadDate').value);
+    formData.append('uploadedBy', uploaderName);
+    if (document.getElementById('uploadAutomation').checked) formData.append('automation', '1');
+    const res = await fetch(`/api/projects/${currentProjectId}/reports`, { method: 'POST', body: formData });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.error) throw new Error(d.error || `등록 실패 (${res.status})`);
+    closeModal('uploadModal');
+    showToast('✅ 링크 리포트가 등록되었습니다.', 'success');
+    await loadProjects();
+    showProjectView(currentProjectId);
+  } catch (e) {
+    showToast('❌ 링크 등록 실패: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = '등록';
+  }
+}
 
 // 다이어그램 파일 불러오기 → 코드 입력창에 내용 주입
 document.addEventListener('change', (e) => {
@@ -3755,9 +3814,12 @@ async function loadTcmanSnapshots() {
   search.disabled = true;
   const d = await api('/api/tcman/snapshots');
   if (!d || d.error || d.configured === false) {
-    list.innerHTML = `<div class="tcman-empty tcman-error">${escapeHtml(d && d.error
+    const main = d && d.error
       ? `⚠ ${d.error}`
-      : '⚠ TC Manager 연동이 설정되지 않았습니다 — 서버에 TCMAN_URL / TCMAN_API_KEY 를 설정해 주세요.')}</div>`;
+      : '⚠ TC Manager 연동이 설정되지 않았습니다 — 서버에 TCMAN_URL / TCMAN_API_KEY 를 설정해 주세요.';
+    // 서버가 전달한 tc-man 원본 메시지(detail)가 있으면 함께 표시 (예: EXPORT_API_KEY 미설정)
+    const detail = d && d.detail ? `<div class="tcman-empty-detail">↳ ${escapeHtml(d.detail)}</div>` : '';
+    list.innerHTML = `<div class="tcman-empty tcman-error">${escapeHtml(main)}${detail}</div>`;
     hint.textContent = 'TC Manager 에 연결되면 스냅샷 목록이 표시됩니다.';
     return;
   }
