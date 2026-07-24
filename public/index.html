@@ -287,6 +287,40 @@
     </div>
   </div>
 
+  <!-- 자동화 연동 모달 (test-run R2 — Playwright 리포터) -->
+  <div class="modal-overlay hidden" id="autoLinkModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🤖 자동화 연동 (Playwright)</h3>
+        <button class="modal-close" onclick="closeModal('autoLinkModal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>① 리포터 설치 — 엔지니어에게 전달</label>
+          <div class="form-hint" style="margin-bottom:6px">
+            <a href="/tr-run-reporter.js" download>tr-run-reporter.js 다운로드</a> 후
+            프로젝트에 두고 <code>playwright.config.ts</code> 에 한 줄 추가:
+          </div>
+          <pre class="auto-link-code">reporter: [['list'], ['./tr-run-reporter.js']],</pre>
+        </div>
+        <div class="form-group">
+          <label>② 실행 값 — 이 보드 전용 (환경변수로 주입)</label>
+          <pre class="auto-link-code" id="autoLinkEnv"></pre>
+          <div class="form-hint">
+            거래소별 실행 시 <code>TR_EXCHANGE</code> 만 바꿔서 실행합니다. 미지정 시
+            Playwright project 명의 <code>[Binance] …</code> 프리픽스로 자동 인식.
+            테스트 제목에는 <code>[SC-…-001]</code> TC ID 태그가 필요합니다.
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-danger-outline" onclick="regenerateRunToken()" title="토큰이 유출됐을 때 — 기존 리포터 설정은 무효화됩니다">토큰 재발급</button>
+        <button class="btn btn-secondary" onclick="closeModal('autoLinkModal')">닫기</button>
+        <button class="btn btn-primary" onclick="copyAutoLinkEnv()">실행 값 복사</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 새 수행 보드 모달 (test-run R1) -->
   <div class="modal-overlay hidden" id="newRunModal">
     <div class="modal">
