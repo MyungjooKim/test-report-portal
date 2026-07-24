@@ -1815,13 +1815,50 @@ mark {
 
 /* 그리드 */
 .run-grid-scroll { overflow: auto; max-height: calc(100vh - 260px); border: 1px solid var(--border); border-radius: var(--radius); background: var(--card-bg); }
-.run-grid th { text-align: center; }
-.run-grid .run-th-tc { text-align: left; min-width: 220px; }
-.run-ex-head { border-left: 2px solid var(--border); background: var(--bg) !important; }
-.run-sub-head { font-size: 11px; font-weight: 500; }
-.run-grid thead tr:nth-child(2) th { top: 33px; } /* 2단 헤더 sticky 보정 */
+
+/* ── 보드 그리드 헤더 — 2단(거래소 그룹 › 자동/수동/최종) 구조를 색·폭으로 정리 ── */
+.run-grid thead th {
+  text-align: center;
+  background: color-mix(in srgb, var(--primary) 5%, var(--card-bg));
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
+  letter-spacing: 0.01em;
+}
+/* 고정 3컬럼(TC·중요도·자동화) — rowspan 2, 살짝 더 진한 헤더 톤으로 본문과 분리 */
+.run-grid thead th[rowspan] {
+  background: color-mix(in srgb, var(--primary) 8%, var(--card-bg));
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
+.run-grid .run-th-tc { text-align: left; min-width: 240px; padding-left: 14px; }
+
+/* 거래소 그룹 헤더 — primary 톤 배경 + 굵은 텍스트로 "묶임"을 강조, 그룹 경계선 */
+.run-ex-head {
+  background: color-mix(in srgb, var(--primary) 14%, var(--card-bg)) !important;
+  color: var(--primary-hover);
+  font-weight: 700;
+  font-size: 13px;
+  border-left: 2px solid color-mix(in srgb, var(--primary) 40%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+}
+/* 서브 헤더(자동🤖 / 수동✋ / 최종) — 최소폭 부여해 눌림 방지, 최종만 강조 */
+.run-sub-head {
+  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  min-width: 74px;
+  background: color-mix(in srgb, var(--primary) 7%, var(--card-bg)) !important; /* 그룹 헤더와 연결감 */
+}
+.run-sub-head.is-final {
+  color: var(--primary-hover); font-weight: 700;
+  background: color-mix(in srgb, var(--primary) 10%, var(--card-bg)) !important;
+}
+/* 거래소 그룹의 첫 서브헤더(자동)와 첫 데이터 셀에 그룹 경계선 */
+.run-sub-head.is-group-start { border-left: 2px solid color-mix(in srgb, var(--primary) 40%, transparent); }
+.run-grid thead tr:nth-child(2) th { top: 39px; } /* 2단 헤더 sticky 보정 (헤더 높이 증가 반영) */
 .run-grid td.run-cell, .run-grid td.run-cell-prio, .run-grid td.run-cell-autocov { text-align: center; }
-.run-grid td.run-cell:first-of-type { border-left: 2px solid var(--border); }
+.run-grid td.run-cell:first-of-type { border-left: 2px solid color-mix(in srgb, var(--primary) 30%, var(--border)); }
 .run-group td {
   background: var(--bg); font-weight: 600; font-size: 12px; color: var(--text-secondary);
   position: sticky; left: 0;
