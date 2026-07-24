@@ -3748,39 +3748,144 @@ function switchRunTab(tab) {
 }
 
 async function loadTcmanSnapshots() {
-  const sel = document.getElementById('runTcmanSelect');
+  const list = document.getElementById('runTcmanList');
   const hint = document.getElementById('runTcmanHint');
-  sel.innerHTML = '<option value="">불러오는 중…</option>';
+  const search = document.getElementById('runTcmanSearch');
+  list.innerHTML = '<div class="tcman-empty">불러오는 중…</div>';
+  search.disabled = true;
   const d = await api('/api/tcman/snapshots');
   if (!d || d.error || d.configured === false) {
-    sel.innerHTML = '<option value="">— 사용 불가 —</option>';
-    sel.disabled = true;
-    hint.textContent = d && d.error
+    list.innerHTML = `<div class="tcman-empty tcman-error">${escapeHtml(d && d.error
       ? `⚠ ${d.error}`
-      : '⚠ TC Manager 연동이 설정되지 않았습니다 — 서버에 TCMAN_URL / TCMAN_API_KEY 를 설정해 주세요.';
+      : '⚠ TC Manager 연동이 설정되지 않았습니다 — 서버에 TCMAN_URL / TCMAN_API_KEY 를 설정해 주세요.')}</div>`;
+    hint.textContent = 'TC Manager 에 연결되면 스냅샷 목록이 표시됩니다.';
     return;
   }
   tcmanData = d;
-  sel.disabled = false;
-  sel.innerHTML = '<option value="" disabled selected hidden>스냅샷 선택…</option>'
-    + d.snapshots.map(s => {
-      const date = String(s.createdAt).slice(0, 10);
-      // tc-man 스냅샷은 프로젝트 소속(version 은 프로젝트별 유일) — project 가 오면 라벨에 표기 (PR #5)
-      const proj = s.project ? `[${s.project.code || s.project.name}] ` : '';
-      const label = `${proj}${s.version}${s.description ? ' — ' + s.description : ''} · TC ${s.tcCount} · ${date}`;
-      return `<option value="${s.id}">${escapeHtml(label)}</option>`;
-    }).join('');
+  search.disabled = false;
+  runTcmanQuery = '';
+  search.value = '';
   if (!d.snapshots.length) {
-    sel.innerHTML = '<option value="">TC Manager 에 스냅샷이 없습니다</option>';
-    sel.disabled = true;
+    list.innerHTML = '<div class="tcman-empty">TC Manager 에 스냅샷이 없습니다.</div>';
+    return;
   }
+  renderTcmanList();
 }
 
-// 스냅샷 선택 → 보드 이름·스냅샷(주기)·거래소 축 자동 채움 (비어 있을 때만, 수정 가능)
-document.addEventListener('change', (e) => {
-  if (e.target.id !== 'runTcmanSelect' || !tcmanData) return;
-  const s = tcmanData.snapshots.find(x => x.id === e.target.value);
+let runTcmanQuery = '';
+let runTcmanCollapsed = new Set();  // 접힌 프로젝트명
+let runTcmanExpanded = new Set();   // "더보기"로 과거 버전까지 펼친 프로젝트명
+const TCMAN_RECENT_N = 5;           // 프로젝트별 기본 노출(최신) 개수
+
+// 접이식 트리 — 프로젝트(접기/펼치기) › 버전(최신순, 기본 최근 N개 + 더보기).
+// 프로젝트는 적고 버전이 시계열로 깊게 쌓이는 데이터 특성에 맞춘 구조.
+function renderTcmanList() {
+  const list = document.getElementById('runTcmanList');
+  const countEl = document.getElementById('runTcmanCount');
+  const selId = document.getElementById('runTcmanSelect').value;
+  if (!tcmanData) return;
+
+  const q = runTcmanQuery.trim().toLowerCase();
+  const match = (s) => {
+    if (!q) return true;
+    const proj = s.project ? (s.project.name || '') + ' ' + (s.project.code || '') : '';
+    return `${proj} ${s.version || ''} ${s.description || ''} ${s.createdBy || ''}`.toLowerCase().includes(q);
+  };
+  const filtered = tcmanData.snapshots.filter(match);
+  countEl.textContent = q
+    ? `${filtered.length} / ${tcmanData.snapshots.length}`
+    : `${tcmanData.snapshots.length}개`;
+
+  if (!filtered.length) {
+    list.innerHTML = '<div class="tcman-empty">검색 결과가 없습니다.</div>';
+    return;
+  }
+
+  // 프로젝트별 그룹 (project 없으면 "미지정")
+  const groups = new Map();
+  for (const s of filtered) {
+    const key = s.project ? (s.project.name || s.project.code) : '(프로젝트 미지정)';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  const groupNames = [...groups.keys()].sort((a, b) => a.localeCompare(b, 'ko'));
+  const searching = !!q; // 검색 중엔 접기·더보기 무시하고 매칭 전부 노출
+
+  const itemHtml = (s, isLatest) => {
+    const date = String(s.createdAt).slice(0, 10);
+    const sel = s.id === selId ? ' selected' : '';
+    const by = s.createdBy ? ` · ${escapeHtml(s.createdBy)}` : '';
+    const desc = s.description ? `<span class="tcman-item-desc">${escapeHtml(s.description)}</span>` : '';
+    const latest = isLatest ? '<span class="tcman-latest">최신</span>' : '';
+    return `
+      <div class="tcman-item${sel}" role="option" aria-selected="${s.id === selId}"
+           tabindex="0" data-id="${escapeAttr(s.id)}" onclick="selectTcmanSnapshot('${escapeAttr(s.id)}')"
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectTcmanSnapshot('${escapeAttr(s.id)}')}">
+        <span class="tcman-item-radio" aria-hidden="true"></span>
+        <div class="tcman-item-main">
+          <div class="tcman-item-top"><b class="tcman-item-ver">${escapeHtml(s.version || '(버전 없음)')}</b>${latest}${desc}</div>
+          <div class="tcman-item-meta">TC ${s.tcCount ?? '—'} · ${date}${by}</div>
+        </div>
+      </div>`;
+  };
+
+  list.innerHTML = groupNames.map(gName => {
+    const all = groups.get(gName).slice().sort(byRecent); // 최신순
+    const collapsed = !searching && runTcmanCollapsed.has(gName);
+    const caret = collapsed ? '▸' : '▾';
+
+    let body = '';
+    if (!collapsed) {
+      const expanded = searching || runTcmanExpanded.has(gName);
+      const shown = expanded ? all : all.slice(0, TCMAN_RECENT_N);
+      body = shown.map((s, i) => itemHtml(s, !searching && i === 0)).join('');
+      const hidden = all.length - shown.length;
+      if (!expanded && hidden > 0) {
+        body += `<button type="button" class="tcman-more" onclick="tcmanShowMore('${escapeAttr(gName)}')">이전 버전 ${hidden}개 더보기 ▾</button>`;
+      } else if (expanded && all.length > TCMAN_RECENT_N && !searching) {
+        body += `<button type="button" class="tcman-more" onclick="tcmanShowLess('${escapeAttr(gName)}')">접기 ▴</button>`;
+      }
+    }
+    return `
+      <div class="tcman-group">
+        <div class="tcman-group-head" onclick="tcmanToggleGroup('${escapeAttr(gName)}')" title="클릭하여 ${collapsed ? '펼치기' : '접기'}">
+          <span class="tcman-caret">${caret}</span>
+          <span class="tcman-group-name">${escapeHtml(gName)}</span>
+          <span class="tcman-group-n">${all.length}</span>
+        </div>
+        ${body}
+      </div>`;
+  }).join('');
+}
+
+// 최신순 정렬 — createdAt 내림차순 (같으면 version 역순)
+function byRecent(a, b) {
+  const da = String(a.createdAt || ''), db = String(b.createdAt || '');
+  if (da !== db) return db.localeCompare(da);
+  return String(b.version || '').localeCompare(String(a.version || ''));
+}
+
+function tcmanToggleGroup(name) {
+  if (runTcmanCollapsed.has(name)) runTcmanCollapsed.delete(name);
+  else runTcmanCollapsed.add(name);
+  renderTcmanList();
+}
+function tcmanShowMore(name) { runTcmanExpanded.add(name); renderTcmanList(); }
+function tcmanShowLess(name) { runTcmanExpanded.delete(name); renderTcmanList(); }
+
+// 카드 클릭/키보드 선택 → hidden input 갱신 + 하이라이트 + 자동 채움
+function selectTcmanSnapshot(id) {
+  if (!tcmanData) return;
+  const s = tcmanData.snapshots.find(x => x.id === id);
   if (!s) return;
+  document.getElementById('runTcmanSelect').value = id;
+  // 하이라이트 갱신 (재렌더 없이 클래스만 토글 — 스크롤 위치 보존)
+  document.querySelectorAll('#runTcmanList .tcman-item').forEach(el => {
+    const on = el.dataset.id === id;
+    el.classList.toggle('selected', on);
+    el.setAttribute('aria-selected', on);
+  });
+  // 보드 이름·스냅샷(주기)·거래소 축 자동 채움 (비어 있을 때만, 수정 가능)
   const nameEl = document.getElementById('runName');
   if (!nameEl.value.trim()) nameEl.value = s.version + (s.description ? ` (${s.description})` : '');
   const snapEl = document.getElementById('runSnapshot');
@@ -3789,6 +3894,13 @@ document.addEventListener('change', (e) => {
   if (!exEl.value.trim() && tcmanData.exchanges && tcmanData.exchanges.length) {
     exEl.value = tcmanData.exchanges.join(', ');
   }
+}
+
+// 검색 입력 (이벤트 위임)
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'runTcmanSearch') return;
+  runTcmanQuery = e.target.value;
+  renderTcmanList();
 });
 
 function openNewRunModal() {
@@ -3800,7 +3912,13 @@ function openNewRunModal() {
   // 기존 그룹 자동완성
   document.getElementById('runGroupList').innerHTML =
     [...new Set(runListData.map(r => r.group).filter(Boolean))].map(g => `<option value="${escapeHtml(g)}">`).join('');
-  document.getElementById('runTcmanSelect').innerHTML = '';
+  document.getElementById('runTcmanSelect').value = '';
+  document.getElementById('runTcmanList').innerHTML = '';
+  runTcmanQuery = '';
+  runTcmanCollapsed = new Set();
+  runTcmanExpanded = new Set();
+  const searchEl = document.getElementById('runTcmanSearch');
+  if (searchEl) searchEl.value = '';
   switchRunTab('file');
   document.getElementById('runFileLabel').textContent = '📋 TC 양식 파일(XLSX/CSV)을 드래그하거나 클릭하여 선택';
   const zone = document.getElementById('runFileZone');

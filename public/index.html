@@ -361,7 +361,16 @@
             <input type="text" id="runGsheetUrl" class="form-input" placeholder="Google Sheets URL 또는 ID">
           </div>
           <div class="upload-tab-content" id="runTabTcman">
-            <select id="runTcmanSelect" class="form-input"></select>
+            <div class="tcman-picker">
+              <div class="tcman-search">
+                <span class="tcman-search-icon">🔍</span>
+                <input type="text" id="runTcmanSearch" class="tcman-search-input"
+                  placeholder="스냅샷 검색 — 프로젝트·버전·설명" autocomplete="off">
+                <span class="tcman-count" id="runTcmanCount"></span>
+              </div>
+              <div class="tcman-list" id="runTcmanList" role="listbox" aria-label="TC Manager 스냅샷"></div>
+              <input type="hidden" id="runTcmanSelect" value="">
+            </div>
             <div class="form-hint" id="runTcmanHint" style="margin-top:6px">
               스냅샷을 선택하면 보드 이름·스냅샷·거래소 축이 자동으로 채워집니다.
               자동화 커버리지(Coverage %)·대상 거래소 매핑이 원본 그대로 반영됩니다.
