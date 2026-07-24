@@ -683,7 +683,7 @@ function consStackRow(axKey, v, filterable = true) {
   return `
     <div class="detail-row ${clickable ? 'cons-click-row' : ''} ${active ? 'active' : ''}"
          ${clickable ? `onclick="setConsAxisFilter('${escapeAttr(axKey)}','${escapeAttr(v.value)}')" title="클릭하면 아래 표를 필터링합니다"` : ''}>
-      <span class="detail-row-label" title="${escapeAttr(v.value)}">${escapeHtml(v.value)}</span>
+      <span class="detail-row-label${axKey === 'suite' ? ' is-wide' : ''}" title="${escapeAttr(v.value)}">${escapeHtml(v.value)}</span>
       <div class="detail-stack">${seg(v.pass,'seg-pass','Pass')}${seg(v.fail,'seg-fail','Fail')}${seg(v.nt,'seg-nt','N/T')}${seg(v.na,'seg-na','결과 없음')}</div>
       <span class="detail-row-counts">${counts}</span>
     </div>`;
