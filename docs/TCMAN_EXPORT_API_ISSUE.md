@@ -1,20 +1,32 @@
-# tc-man export API 연동 — 확인 요청 (tr_ui → tc-man 팀)
+# tc-man export API 연동 — ✅ 연동 완료 (히스토리)
 
-> 2026-07-23 작성 / 2026-07-24 갱신.
+> 2026-07-23 작성 / 2026-07-24 연동 완료.
 
-## ✅ 진행 상황 (2026-07-24 최신) — 미들웨어 뚫림, EXPORT_API_KEY 만 남음
+## ✅ 연동 완료 (2026-07-24)
 
-**어제(307 → /login)에서 오늘 크게 진전됨.** 지금 `tc-man.rgrg.im/api/export/snapshots` 를 호출하면:
+운영 `tr.rgrg.im` → `tc-man.rgrg.im/api/export/snapshots` **HTTP 200**, 스냅샷 정상 수신.
+보드 생성 모달의 "TC Manager" 탭에서 스냅샷 목록(트리·최신순)이 뜬다.
 
-```
-HTTP 503  {"error":"EXPORT_API_KEY 미설정 — 내보내기 API가 비활성화되어 있습니다."}
-```
+### 최종 해결까지의 경과 (계층별로 하나씩 풀림)
 
-- 307 리다이렉트가 사라짐 → **세션 미들웨어 예외가 반영되어 export 핸들러까지 요청이 도달함** ✅
-- 남은 것은 **딱 하나: tc-man 서버에 `EXPORT_API_KEY` 환경변수 설정**. 설정되는 순간 200 + 스냅샷 목록이 오고, tr_ui 는 재배포 없이 자동 연동됨.
-- (참고) 그 사이 순간적으로 브라우저에 **502(Cloudflare Bad gateway)** 가 보였는데, 이는 tc-man 오리진이 잠시 다운됐던 때(배포 중 추정). 지금은 503 으로 안정화. tr_ui 는 이 502/HTML 응답에도 화면이 깨지지 않도록 방어 코드 반영함(v0.19.4).
+| 시점 | tc-man 응답 | 원인 | 조치 |
+|---|---|---|---|
+| 07-23 | 307 → /login | 세션 미들웨어가 `/api/export/*` 가로챔 | tc-man: 미들웨어 matcher 예외 반영 |
+| 07-24 오전 | 503 EXPORT_API_KEY 미설정 | 미들웨어는 뚫렸으나 키 미설정 | tc-man: `EXPORT_API_KEY` 설정 |
+| 07-24 오후 | 401 unauthorized | **운영 tr `.env` 키가 tc-man 키와 불일치** | tr: 운영 `.env` 키 교체 → 재빌드 |
+| 07-24 | **200 ✅** | — | 연동 성립 |
 
-**→ tc-man 팀 To-Do: `EXPORT_API_KEY` 환경변수만 설정해 주세요.** (아래 상세는 히스토리)
+### 키 정합 (중요 — 다음에 헷갈리지 않도록)
+
+- **로컬 tc-man(`host.docker.internal:3100`)과 운영 tc-man(`tc-man.rgrg.im`)은 같은 export 키를 공유**한다.
+- 즉 로컬 `.env` 의 `TCMAN_API_KEY` = 운영 `.env` 의 `TCMAN_API_KEY` (동일 값).
+- 한때 운영에 다른(로컬 3100 초기값) 키가 들어가 401 이 났음 → 로컬과 동일 키로 맞춰 해결.
+- `.env` 는 Dockerfile `COPY .env*` 로 이미지에 구워지므로, 키 변경 시 **이미지 재빌드+컨테이너 재생성** 필요(파일 수정만으론 반영 안 됨).
+
+### tr_ui 측 방어 (v0.19.4)
+
+tc-man 이 401/503/502(Cloudflare) 등 비200 을 줘도 화면이 깨지지 않고 상태별 안내를 표시한다.
+(프론트 `api()` 비JSON 방어 + 서버 `/api/tcman/snapshots` upstream 상태 구분)
 
 ---
 
