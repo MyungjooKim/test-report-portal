@@ -3408,7 +3408,11 @@ function renderRunGrid() {
   const colCount = 3 + exs.length * 3;
 
   const exHead1 = exs.map(ex => `<th colspan="3" class="run-ex-head">${escapeHtml(exLabel(ex))}</th>`).join('');
-  const exHead2 = exs.map(() => '<th class="run-sub-head">자동 🤖</th><th class="run-sub-head">수동 ✋</th><th class="run-sub-head">최종</th>').join('');
+  const exHead2 = exs.map(() =>
+    '<th class="run-sub-head is-group-start">자동 🤖</th>'
+    + '<th class="run-sub-head">수동 ✋</th>'
+    + '<th class="run-sub-head is-final">최종</th>'
+  ).join('');
 
   // 그리드 3단: Suite(시트) 섹션 > 대분류›중분류 그룹 > TC 행 — 시트 1개면 섹션 생략(현행 유지)
   const suiteOrder = [];
